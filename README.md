@@ -9,6 +9,13 @@
   <a href="https://ai.pydantic.dev">pydantic-ai</a>.
 </p>
 
+<p align="center">
+  <a href="https://pypi.org/project/ubiquity/"><img src="https://img.shields.io/pypi/v/ubiquity.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ubiquity/"><img src="https://img.shields.io/pypi/pyversions/ubiquity.svg" alt="Python versions"></a>
+  <a href="https://pypi.org/project/ubiquity/"><img src="https://img.shields.io/pypi/dm/ubiquity.svg" alt="Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/pypi/l/ubiquity.svg" alt="MIT License"></a>
+</p>
+
 Everything a terminal coding agent needs — the agent loop, a built-in tool
 suite, a rule-based permission system, hooks, subagents, MCP, and session
 persistence — built against pydantic-ai's model layer, so the same agent runs on
