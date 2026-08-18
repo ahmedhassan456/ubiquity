@@ -1,0 +1,51 @@
+[project]
+name = "ubiquity"
+version = "0.1.4"
+description = "A coding-agent SDK built on pydantic-ai, supporting 600+ models across 22 providers"
+readme = "README.md"
+authors = [
+    { name = "Ahmed Saqr", email = "ahmedhassansaqr28@gmail.com" }
+]
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["agent", "sdk", "pydantic-ai", "llm", "coding-agent", "mcp", "tools"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+dependencies = [
+    "anyio>=4.14.2",
+    "groq>=1.6.0",
+    "pydantic-ai>=2.16",
+]
+
+[project.urls]
+Homepage = "https://github.com/ahmedhassan456/ubiquity"
+Repository = "https://github.com/ahmedhassan456/ubiquity"
+Issues = "https://github.com/ahmedhassan456/ubiquity/issues"
+
+[build-system]
+requires = ["uv_build>=0.11.22,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ubiquity"
+module-root = "src"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
