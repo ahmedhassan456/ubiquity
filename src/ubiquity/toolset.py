@@ -13,6 +13,11 @@ execution pipeline for every call:
 Failures at steps 1-4 are returned to the model as `ModelRetry` so it can
 correct itself, rather than aborting the run. A denial is terminal for that
 call but not for the turn.
+
+Every call emits a `tool_use` message and exactly one `tool_result` bearing
+the same `tool_use_id`, whether it ran, was refused, or raised. A host reads
+that pairing as the lifecycle of a call, so a refusal that emitted nothing
+would leave the call it refused displayed as still running.
 """
 
 from __future__ import annotations
@@ -147,6 +152,7 @@ class UbiquityToolset(AbstractToolset[Any]):
         call_ctx = replace(self._ctx, tool_use_id=tool_use_id)
 
         args_dict = dict(tool_args)
+        began = time.monotonic()
 
         try:
             hook_result = await self._run_pre_tool_hook(name, args_dict, tool_use_id)
@@ -162,9 +168,16 @@ class UbiquityToolset(AbstractToolset[Any]):
             await self._authorize(impl, parsed, call_ctx, args_dict, tool_use_id)
             parsed = self._parse(impl, args_dict)
         except ToolDenied as denied:
+            message = f"Tool call denied: {denied.message}"
+            self._send_refusal(name, tool_use_id, args_dict, message, began, call_ctx)
             if denied.interrupt:
                 raise
-            return f"Tool call denied: {denied.message}"
+            return message
+        except ModelRetry as retry:
+            self._send_refusal(
+                name, tool_use_id, args_dict, str(retry), began, call_ctx
+            )
+            raise
 
         self._send(
             SDKToolUseMessage(
@@ -179,25 +192,29 @@ class UbiquityToolset(AbstractToolset[Any]):
         started = time.monotonic()
         try:
             output = await impl.call(parsed, call_ctx)
-        except ToolDenied:
+        except ToolDenied as denied:
+            self._send_result(
+                name,
+                tool_use_id,
+                ToolOutput(content=f"Tool call denied: {denied.message}", is_error=True),
+                started,
+                call_ctx,
+            )
             raise
         except Exception as exc:
             await self._run_post_tool_hook(
                 "PostToolUseFailure", name, args_dict, tool_use_id, str(exc)
             )
+            self._send_result(
+                name,
+                tool_use_id,
+                ToolOutput(content=f"{name} failed: {exc}", is_error=True),
+                started,
+                call_ctx,
+            )
             raise ModelRetry(f"{name} failed: {exc}") from exc
 
-        duration_ms = (time.monotonic() - started) * 1000
-        self._send(
-            SDKToolResultMessage(
-                tool_name=name,
-                tool_use_id=tool_use_id,
-                output=output,
-                duration_ms=duration_ms,
-                session_id=call_ctx.session_id,
-                parent_tool_use_id=self._parent_tool_use_id,
-            )
-        )
+        self._send_result(name, tool_use_id, output, started, call_ctx)
 
         extra = await self._run_post_tool_hook(
             "PostToolUse", name, args_dict, tool_use_id, output.content
@@ -290,6 +307,66 @@ class UbiquityToolset(AbstractToolset[Any]):
         """Forward an SDK message to the loop, if one is listening."""
         if self._emit is not None:
             self._emit(message)
+
+    def _send_result(
+        self,
+        name: str,
+        tool_use_id: str,
+        output: ToolOutput,
+        started: float,
+        call_ctx: ToolContext,
+    ) -> None:
+        """Emit the result of one call, timed from `started`."""
+        self._send(
+            SDKToolResultMessage(
+                tool_name=name,
+                tool_use_id=tool_use_id,
+                output=output,
+                duration_ms=(time.monotonic() - started) * 1000,
+                session_id=call_ctx.session_id,
+                parent_tool_use_id=self._parent_tool_use_id,
+            )
+        )
+
+    def _send_refusal(
+        self,
+        name: str,
+        tool_use_id: str,
+        args: dict[str, Any],
+        message: str,
+        began: float,
+        call_ctx: ToolContext,
+    ) -> None:
+        """Emit a use-and-result pair for a call that never reached the tool.
+
+        The model response carrying the call has already been streamed by the
+        time the pipeline refuses it, so a host is showing that call as
+        outstanding. Reporting the refusal only in `SDKResultMessage` leaves it
+        outstanding until the run ends, which for a denial is exactly the
+        moment the user needed to be told. Emitting the pair here keeps the
+        invariant a host can actually rely on: every `tool_use` is answered by
+        a `tool_result` bearing the same `tool_use_id`.
+
+        `args` is what the call was refused for, which is not always what the
+        model asked: a PreToolUse hook may have rewritten the input before a
+        rule rejected it, and the rewritten form is the one that was judged.
+        """
+        self._send(
+            SDKToolUseMessage(
+                tool_name=name,
+                tool_input=args,
+                tool_use_id=tool_use_id,
+                session_id=call_ctx.session_id,
+                parent_tool_use_id=self._parent_tool_use_id,
+            )
+        )
+        self._send_result(
+            name,
+            tool_use_id,
+            ToolOutput(content=message, is_error=True),
+            began,
+            call_ctx,
+        )
 
     def _hook_payload(self, event: str, name: str, args: dict[str, Any], tid: str):
         """Build the common hook payload for a tool-scoped event."""

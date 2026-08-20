@@ -77,8 +77,9 @@ _NOTIFICATION_REASONS = {
 }
 """The `reason` a run's terminal notification carries, keyed by result subtype.
 
-A run that ends with `success` but still has an error text was vetoed by a
-`Stop` hook, which is neither of these and falls back to ``stopped``.
+Anything else that sets an error text falls back to ``stopped``. A `Stop` hook
+is no longer one of them: blocking sends the agent back for another turn, so a
+hook that never relents surfaces as `max_turns` rather than as its own reason.
 """
 
 
@@ -226,6 +227,63 @@ def _meter_for(ctx: ToolContext) -> CostMeter:
         )
         ctx.extra["cost_meter"] = meter
     return meter
+
+
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "requests",
+    "tool_calls",
+)
+
+DEFAULT_STOP_BLOCK = (
+    "A Stop hook blocked the end of this turn but gave no reason. Review "
+    "whether the work is genuinely complete before finishing again."
+)
+
+
+def _add_usage(totals: dict[str, Any], usage: Any) -> dict[str, Any]:
+    """Fold one leg's usage into the run's running totals.
+
+    A run vetoed by a `Stop` hook is driven by more than one `agent.iter`, and
+    each of those reports only its own leg. Replacing the totals would bill the
+    caller for the final continuation alone, which is a number that looks
+    plausible and understates every run a hook extended.
+    """
+    return {
+        field: totals.get(field, 0) + getattr(usage, field)
+        for field in USAGE_FIELDS
+    }
+
+
+async def _stop_veto(
+    hooks: HookRegistry,
+    ctx: ToolContext,
+    options: Options,
+    session_id: str,
+) -> str | None:
+    """Fire the `Stop` hook and return the reason it blocked on, or None.
+
+    Blocking means the agent is asked for another turn with that reason as its
+    next prompt, which is the only reading that matches what a `Stop` hook is
+    for: a check that the work is actually done. Firing it after the loop has
+    already exited could do nothing but rewrite the result text, which turned a
+    successful run into a reported failure and never gave the model the turn
+    the veto was asking for.
+    """
+    outcome = await hooks.run(
+        HookInput(
+            hook_event_name="Stop",
+            session_id=session_id,
+            cwd=str(ctx.cwd),
+            permission_mode=options.permission_mode,
+        )
+    )
+    if outcome.decision != "block":
+        return None
+    return outcome.reason or DEFAULT_STOP_BLOCK
 
 
 def _build_context(options: Options, session_id: str, hooks: HookRegistry) -> ToolContext:
@@ -709,107 +767,113 @@ async def summon(
     usage: dict[str, Any] = {}
     error: str | None = None
 
-    try:
-        cached = cacheable_prompt(full_prompt, model, bool(options.cache_prompt))
-        async with agent.iter(cached, message_history=history or None) as run:
-            async for node in run:
+    next_prompt = full_prompt
+
+    while True:
+        finished = False
+        try:
+            cached = cacheable_prompt(next_prompt, model, bool(options.cache_prompt))
+            async with agent.iter(cached, message_history=history or None) as run:
+                async for node in run:
+                    while pending:
+                        yield pending.pop(0)
+
+                    if options.abort is not None and options.abort.is_set():
+                        subtype = "error_during_execution"
+                        error = "Run aborted."
+                        break
+
+                    if isinstance(node, ModelRequestNode):
+                        turns += 1
+                        if turns > options.max_turns:
+                            subtype = "error_max_turns"
+                            error = f"Exceeded max_turns ({options.max_turns})."
+                            break
+
+                        if options.auto_compact:
+                            for reclaimed in await _maybe_compact(
+                                run, options, ctx, hooks, session_id, model_label, failures
+                            ):
+                                if detector is not None:
+                                    detector.reset(session_id)
+                                if store is not None:
+                                    store.append(session_id, ctx.cwd, reclaimed)
+                                yield reclaimed
+
+                        if detector is not None:
+                            detector.record(
+                                session_id,
+                                await _snapshot(options, tools, ctx, model_label),
+                            )
+
+                        if options.include_partial_messages:
+                            async for partial in _stream_partials(node, run, session_id):
+                                yield partial
+
+                    elif isinstance(node, CallToolsNode):
+                        meter.add(
+                            node.model_response.model_name,
+                            node.model_response.provider_name,
+                            node.model_response.usage,
+                        )
+                        if detector is not None:
+                            response_usage = node.model_response.usage
+                            broke = detector.check(
+                                session_id,
+                                response_usage.cache_read_tokens,
+                                response_usage.cache_write_tokens,
+                            )
+                            if broke is not None:
+                                logger.warning("%s", broke)
+
+                        assistant = SDKAssistantMessage(
+                            content=_response_blocks(node.model_response),
+                            session_id=session_id,
+                            model=model_label,
+                        )
+                        if store is not None:
+                            store.append(session_id, ctx.cwd, assistant)
+                        yield assistant
+
                 while pending:
                     yield pending.pop(0)
 
-                if options.abort is not None and options.abort.is_set():
-                    subtype = "error_during_execution"
-                    error = "Run aborted."
-                    break
+                if run.result is not None:
+                    finished = True
+                    final_text = str(run.result.output)
+                    history = run.result.all_messages()
+                    usage = _add_usage(usage, run.usage)
 
-                if isinstance(node, ModelRequestNode):
-                    turns += 1
-                    if turns > options.max_turns:
-                        subtype = "error_max_turns"
-                        error = f"Exceeded max_turns ({options.max_turns})."
-                        break
+        except ToolDenied as denied:
+            subtype = "error_during_execution"
+            error = f"Run interrupted: {denied.message}"
+        except Exception as exc:
+            logger.exception("summon failed")
+            subtype = "error_during_execution"
+            error = f"{type(exc).__name__}: {exc}"
 
-                    if options.auto_compact:
-                        for reclaimed in await _maybe_compact(
-                            run, options, ctx, hooks, session_id, model_label, failures
-                        ):
-                            if detector is not None:
-                                detector.reset(session_id)
-                            if store is not None:
-                                store.append(session_id, ctx.cwd, reclaimed)
-                            yield reclaimed
+        while pending:
+            yield pending.pop(0)
 
-                    if detector is not None:
-                        detector.record(
-                            session_id,
-                            await _snapshot(options, tools, ctx, model_label),
-                        )
+        if not finished:
+            break
 
-                    if options.include_partial_messages:
-                        async for partial in _stream_partials(node, run, session_id):
-                            yield partial
+        blocked = await _stop_veto(hooks, ctx, options, session_id)
+        if blocked is None:
+            break
+        if turns >= options.max_turns:
+            subtype = "error_max_turns"
+            error = f"Exceeded max_turns ({options.max_turns})."
+            break
 
-                elif isinstance(node, CallToolsNode):
-                    meter.add(
-                        node.model_response.model_name,
-                        node.model_response.provider_name,
-                        node.model_response.usage,
-                    )
-                    if detector is not None:
-                        response_usage = node.model_response.usage
-                        broke = detector.check(
-                            session_id,
-                            response_usage.cache_read_tokens,
-                            response_usage.cache_write_tokens,
-                        )
-                        if broke is not None:
-                            logger.warning("%s", broke)
-
-                    assistant = SDKAssistantMessage(
-                        content=_response_blocks(node.model_response),
-                        session_id=session_id,
-                        model=model_label,
-                    )
-                    if store is not None:
-                        store.append(session_id, ctx.cwd, assistant)
-                    yield assistant
-
-            while pending:
-                yield pending.pop(0)
-
-            if run.result is not None:
-                final_text = str(run.result.output)
-                run_usage = run.usage
-                usage = {
-                    "input_tokens": run_usage.input_tokens,
-                    "output_tokens": run_usage.output_tokens,
-                    "cache_read_tokens": run_usage.cache_read_tokens,
-                    "cache_write_tokens": run_usage.cache_write_tokens,
-                    "requests": run_usage.requests,
-                    "tool_calls": run_usage.tool_calls,
-                }
-
-    except ToolDenied as denied:
-        subtype = "error_during_execution"
-        error = f"Run interrupted: {denied.message}"
-    except Exception as exc:
-        logger.exception("summon failed")
-        subtype = "error_during_execution"
-        error = f"{type(exc).__name__}: {exc}"
+        next_prompt = blocked
+        continuation = SDKUserMessage(content=blocked, session_id=session_id)
+        if store is not None:
+            store.append(session_id, ctx.cwd, continuation)
+        yield continuation
 
     while pending:
         yield pending.pop(0)
-
-    if subtype == "success":
-        stop_hook = await hooks.run(
-            HookInput(
-                hook_event_name="Stop",
-                session_id=session_id,
-                cwd=str(ctx.cwd),
-                permission_mode=options.permission_mode,
-            )
-        )
-        if stop_hook.decision == "block":
-            error = stop_hook.reason
 
     if error is not None:
         await hooks.notify(

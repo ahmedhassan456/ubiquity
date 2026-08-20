@@ -175,6 +175,76 @@ class TestIncludes:
     def test_an_email_address_is_not_an_include(self, tmp_path: Path) -> None:
         assert include_paths("mail someone@example.com", tmp_path) == []
 
+    def test_an_include_at_the_end_of_a_line_works(self, tmp_path: Path) -> None:
+        """The form that always worked, pinned so trimming cannot break it."""
+        write(tmp_path / "style.md", "two spaces")
+        write(tmp_path / "UBIQUITY.md", "the rest is in @style.md")
+        assert names(load_memory(("project",), tmp_path)) == [
+            "UBIQUITY.md",
+            "style.md",
+        ]
+
+    @pytest.mark.parametrize(
+        "sentence",
+        [
+            "rules live in @style.md, and more follow",
+            "rules live in @style.md.",
+            "rules live in @style.md; more follow",
+            "rules live in @style.md: like so",
+            "have you read @style.md?",
+            "read @style.md!",
+            "see (@style.md) for the rest",
+            "see [@style.md] for the rest",
+            'see "@style.md" for the rest',
+        ],
+    )
+    def test_punctuation_around_a_reference_is_not_part_of_it(
+        self, tmp_path: Path, sentence: str
+    ) -> None:
+        """An `@path` written mid-sentence has punctuation on both sides of it.
+
+        The capture runs to the next whitespace, so without trimming the
+        filename ends up as `style.md,` -- a file nobody has, missing in
+        silence. Only a reference that was the last word on its line worked.
+        """
+        write(tmp_path / "style.md", "two spaces")
+        write(tmp_path / "UBIQUITY.md", sentence)
+        assert names(load_memory(("project",), tmp_path)) == [
+            "UBIQUITY.md",
+            "style.md",
+        ]
+
+    def test_the_readme_example_resolves(self, tmp_path: Path) -> None:
+        """The documented example is the one a reader will copy first."""
+        write(tmp_path / "docs" / "style.md", "two spaces")
+        write(tmp_path / "notes" / "release.md", "tag, then push")
+        write(
+            tmp_path / "UBIQUITY.md",
+            "Style rules live in @docs/style.md, and the release steps in "
+            "@notes/release.md.",
+        )
+        assert names(load_memory(("project",), tmp_path)) == [
+            "UBIQUITY.md",
+            "style.md",
+            "release.md",
+        ]
+
+    def test_two_references_on_one_line_stay_separate(self, tmp_path: Path) -> None:
+        write(tmp_path / "a.md", "a")
+        write(tmp_path / "b.md", "b")
+        write(tmp_path / "UBIQUITY.md", "first @a.md, then @b.md.")
+        assert names(load_memory(("project",), tmp_path))[1:] == ["a.md", "b.md"]
+
+    def test_an_escaped_space_survives_trimming(self, tmp_path: Path) -> None:
+        """Trimming works on the tail, so it must not undo the escape handling."""
+        write(tmp_path / "my notes.md", "notes")
+        write(tmp_path / "UBIQUITY.md", "see @my\\ notes.md, please")
+        assert names(load_memory(("project",), tmp_path))[1:] == ["my notes.md"]
+
+    def test_a_bare_at_is_not_an_include(self, tmp_path: Path) -> None:
+        """Trimming can empty a reference, and an empty one names nothing."""
+        assert include_paths("ask @. or @, about it", tmp_path) == []
+
     def test_a_missing_include_is_ignored(self, tmp_path: Path) -> None:
         write(tmp_path / "UBIQUITY.md", "@nope.md")
         assert names(load_memory(("project",), tmp_path)) == ["UBIQUITY.md"]

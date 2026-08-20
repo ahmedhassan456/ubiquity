@@ -159,7 +159,15 @@ async def test_exhausting_the_turn_budget_notifies(tmp_path: Path) -> None:
     assert "max_turns" in _reasons(seen)
 
 
-async def test_a_stop_hook_holding_the_run_open_notifies(tmp_path: Path) -> None:
+async def test_a_stop_hook_that_never_relents_notifies_at_the_turn_limit(
+    tmp_path: Path,
+) -> None:
+    """A hook that always blocks holds the run open until its budget runs out.
+
+    Blocking asks for another turn, so a hook that never accepts an ending is
+    asking without limit. `max_turns` is what bounds it, and exhausting the
+    budget is the honest report of what happened.
+    """
     seen, record = _recorder()
 
     async def keep_going(payload: HookInput) -> HookOutput:
@@ -179,8 +187,35 @@ async def test_a_stop_hook_holding_the_run_open_notifies(tmp_path: Path) -> None
             max_turns=4,
         ),
     )
-    assert _reasons(seen) == ["stopped"]
-    assert seen[0].message == "not finished yet"
+    assert _reasons(seen) == ["max_turns"]
+
+
+async def test_a_stop_hook_that_relents_notifies_nothing(tmp_path: Path) -> None:
+    """One more turn and then an ending is an ordinary run, not an incident."""
+    seen, record = _recorder()
+    blocks = {"n": 0}
+
+    async def once(payload: HookInput) -> HookOutput:
+        blocks["n"] += 1
+        if blocks["n"] > 1:
+            return HookOutput()
+        return HookOutput(decision="block", reason="check the tests first")
+
+    await _run(
+        "answer",
+        Options(
+            model=FunctionModel(
+                lambda messages, info: ModelResponse(parts=[TextPart(content="hi")])
+            ),
+            cwd=tmp_path,
+            tools=[],
+            hooks=[*_hooks(record), HookMatcher("Stop", [once])],
+            persist_session=False,
+            persist_todos=False,
+            max_turns=4,
+        ),
+    )
+    assert _reasons(seen) == []
 
 
 async def test_a_successful_run_notifies_nothing(tmp_path: Path) -> None:

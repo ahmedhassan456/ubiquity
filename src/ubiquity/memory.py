@@ -53,7 +53,23 @@ TEXT_SUFFIXES = frozenset(
     {".md", ".markdown", ".txt", ".text", ".rst", ".json", ".toml", ".yaml", ".yml"}
 )
 
-INCLUDE_RE = re.compile(r"(?:^|\s)@((?:[^\s\\]|\\ )+)")
+INCLUDE_RE = re.compile(r"""(?:^|[\s([{"'])@((?:[^\s\\]|\\ )+)""")
+"""Matches an ``@path`` reference in prose.
+
+What may precede the `@` is what keeps an email address from being read as an
+include: a letter or digit before it means no match, so ``me@example.com`` is
+left alone while ``(@docs/style.md)`` is not.
+"""
+
+TRAILING_PUNCTUATION = ".,;:!?)]}\"'"
+"""Sentence punctuation trimmed from the tail of an `@path`.
+
+The capture runs to the next whitespace, so a reference written mid-sentence
+carries the comma or full stop after it into the filename. Trimming loses the
+ability to name a file whose own name ends in punctuation, which is a file
+nobody has, and buys back every `@path` that is not the last word on its line.
+"""
+
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 INLINE_CODE_RE = re.compile(r"`[^`]*`")
 
@@ -182,6 +198,7 @@ def include_paths(content: str, base: Path) -> list[Path]:
     for line in _prose_lines(content):
         for raw in INCLUDE_RE.findall(line):
             reference = raw.split("#", 1)[0].replace("\\ ", " ")
+            reference = reference.rstrip(TRAILING_PUNCTUATION)
             if not reference or reference.startswith("@"):
                 continue
             if not (

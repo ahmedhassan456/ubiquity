@@ -298,9 +298,16 @@ same chain see the rewrite. `UserPromptSubmit` and `SessionStart` may inject
 context via `additional_context`.
 
 `Notification` is informational rather than a gate: it fires when a call is
-waiting on approval and when a run ends by exhausting its turns, raising, or
-being held open by a `Stop` hook. `payload.extra["reason"]` distinguishes them
-(`permission_required`, `max_turns`, `error`, `stopped`).
+waiting on approval and when a run ends by exhausting its turns or by raising.
+`payload.extra["reason"]` distinguishes them (`permission_required`,
+`max_turns`, `error`, `stopped`).
+
+A `Stop` hook that returns `decision="block"` sends the agent back for another
+turn, with `reason` as its next prompt and the run's history intact. That is
+how a hook enforces "the tests must pass before you stop": it blocks until it
+is satisfied. Blocking does not fail the run — a continued run that finishes
+still reports `success`. A hook that never relents is bounded by `max_turns`,
+which the run then reports.
 
 ## Subagents
 
@@ -963,11 +970,17 @@ so adding a source can add instructions but never reorder the ones already
 there. That matters beyond tidiness — this text sits in the cached prefix, and
 a listing that renders differently between two runs costs a full cache miss.
 
-A file can pull in another with `@path`:
+A file can pull in another with `@path`, anywhere in a sentence:
 
 ```markdown
-Style rules live in @docs/style.md, and the release steps in @~/notes/release.md.
+Style rules live in @docs/style.md, and the release steps in @docs/release.md.
 ```
+
+A reference ends at the whitespace after it, with any sentence punctuation
+trimmed off the tail, so `@docs/style.md,` and `(@docs/style.md)` both name
+`docs/style.md`. Escape a space in a filename as `@my\ notes.md`. An `@`
+preceded by a letter or digit is not a reference, which is what keeps
+`me@example.com` out of it.
 
 The included file is loaded straight after the file that named it, and the
 render says which file included it. Relative paths resolve against the
