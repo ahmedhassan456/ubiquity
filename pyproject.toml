@@ -1,6 +1,6 @@
 [project]
 name = "ubiquity"
-version = "0.1.1"
+version = "0.1.2"
 description = "A coding-agent SDK built on pydantic-ai, supporting 600+ models across 22 providers"
 readme = "README.md"
 authors = [
