@@ -10,9 +10,14 @@
 </p>
 
 <p align="center">
+  <b><a href="https://ubiquity-docs.vercel.app/">Read the documentation</a></b>
+</p>
+
+<p align="center">
   <a href="https://pypi.org/project/ubiquity/"><img src="https://img.shields.io/pypi/v/ubiquity.svg" alt="PyPI"></a>
   <a href="https://pypi.org/project/ubiquity/"><img src="https://img.shields.io/pypi/pyversions/ubiquity.svg" alt="Python versions"></a>
   <a href="https://pypi.org/project/ubiquity/"><img src="https://img.shields.io/pypi/dm/ubiquity.svg" alt="Downloads"></a>
+  <a href="https://ubiquity-docs.vercel.app/"><img src="https://img.shields.io/badge/docs-ubiquity--docs.vercel.app-blue.svg" alt="Documentation"></a>
   <a href="LICENSE"><img src="https://img.shields.io/pypi/l/ubiquity.svg" alt="MIT License"></a>
 </p>
 
@@ -112,6 +117,11 @@ that the `Bash` tool spawns, and never touches the provider.
 ```bash
 uv add ubiquity
 ```
+
+The full documentation lives at
+**[ubiquity-docs.vercel.app](https://ubiquity-docs.vercel.app/)**. What follows
+here is the tour; the docs site carries the complete API reference and the
+longer guides.
 
 ## The message stream
 
@@ -1079,6 +1089,12 @@ the engine requires all of them to match.
 uv sync
 uv run pytest
 ```
+
+## Links
+
+- [Documentation](https://ubiquity-docs.vercel.app/)
+- [PyPI](https://pypi.org/project/ubiquity/)
+- [Source](https://github.com/ahmedhassan456/ubiquity)
 
 ## License
 
