@@ -18,11 +18,20 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from ubiquity import Options
-from ubiquity.cli.commands import ReplState, dispatch, is_command
+from ubiquity.cli import ui
+from ubiquity.cli.commands import COMMANDS, MODES, ReplState, dispatch, is_command
 from ubiquity.cli.main import _read_prompt, _run_turn, build_parser, options_from
 from ubiquity.cli.prompts import terminal_handler
 from ubiquity.cli.render import Renderer
 from ubiquity.tool import PermissionContext, ToolContext
+
+
+@pytest.fixture(autouse=True)
+def captured_console() -> io.StringIO:
+    """Point the shared console at a buffer, so tests read what was drawn."""
+    buffer = io.StringIO()
+    ui.set_console(file=buffer, color=False, width=120)
+    return buffer
 
 
 def scripted(*turns: list[Any]) -> FunctionModel:
@@ -37,9 +46,8 @@ def scripted(*turns: list[Any]) -> FunctionModel:
     return FunctionModel(respond)
 
 
-def renderer(output_format: str = "text", **kwargs: Any) -> tuple[Renderer, io.StringIO]:
-    buffer = io.StringIO()
-    return Renderer(output_format, color=False, stream=buffer, **kwargs), buffer
+def renderer(output_format: str = "text", **kwargs: Any) -> Renderer:
+    return Renderer(output_format, **kwargs)
 
 
 def state_for(model: FunctionModel, cwd: Path, **kwargs: Any) -> ReplState:
@@ -89,43 +97,52 @@ class TestArguments:
 
 
 class TestRendering:
-    async def test_stream_json_emits_every_message(self, tmp_path: Path) -> None:
+    async def test_stream_json_emits_every_message(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
         model = scripted([TextPart("hello")])
-        view, buffer = renderer("stream-json")
+        view = renderer("stream-json")
         await _run_turn("hi", state_for(model, tmp_path), view, interactive=False)
 
-        kinds = [json.loads(line)["type"] for line in buffer.getvalue().splitlines()]
+        kinds = [
+            json.loads(line)["type"]
+            for line in captured_console.getvalue().splitlines()
+        ]
         assert kinds[0] == "system"
         assert kinds[-1] == "result"
         assert "assistant" in kinds
 
-    async def test_json_prints_only_the_result(self, tmp_path: Path) -> None:
+    async def test_json_prints_only_the_result(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
         model = scripted([TextPart("hello")])
-        view, buffer = renderer("json")
+        view = renderer("json")
         await _run_turn("hi", state_for(model, tmp_path), view, interactive=False)
 
-        lines = buffer.getvalue().splitlines()
+        lines = captured_console.getvalue().splitlines()
         assert len(lines) == 1
         assert json.loads(lines[0])["type"] == "result"
 
-    async def test_text_prints_assistant_and_tool_call(self, tmp_path: Path) -> None:
+    async def test_text_prints_assistant_and_tool_call(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
         (tmp_path / "note.txt").write_text("contents")
         model = scripted(
             [ToolCallPart("Read", {"file_path": str(tmp_path / "note.txt")})],
             [TextPart("read it")],
         )
-        view, buffer = renderer("text")
+        view = renderer("text")
         state = state_for(model, tmp_path, permission_mode="bypassPermissions")
         code = await _run_turn("read", state, view, interactive=False)
 
-        output = buffer.getvalue()
+        output = captured_console.getvalue()
         assert code == 0
-        assert "● Read" in output
+        assert "Read" in output
         assert "read it" in output
 
     async def test_result_carries_session_and_turns(self, tmp_path: Path) -> None:
         model = scripted([TextPart("done")])
-        view, _ = renderer("text")
+        view = renderer("text")
         state = state_for(model, tmp_path)
         await _run_turn("hi", state, view, interactive=False)
 
@@ -138,7 +155,7 @@ class TestPermissionHandler:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("builtins.input", lambda *a: "n")
-        view, _ = renderer("text")
+        view = renderer("text")
         options = Options(cwd=tmp_path)
         result = await terminal_handler(view)(
             "Write", {"file_path": "x", "content": "y"}, context_for(options)
@@ -149,7 +166,7 @@ class TestPermissionHandler:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("builtins.input", lambda *a: "a")
-        view, _ = renderer("text")
+        view = renderer("text")
         ctx = context_for(Options(cwd=tmp_path))
         result = await terminal_handler(view)("Write", {"file_path": "x"}, ctx)
 
@@ -160,7 +177,7 @@ class TestPermissionHandler:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("builtins.input", lambda *a: "2")
-        view, _ = renderer("text")
+        view = renderer("text")
         tool_input = {
             "questions": [
                 {
@@ -184,7 +201,7 @@ class TestPermissionHandler:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("builtins.input", lambda *a: "neither, use yaml")
-        view, _ = renderer("text")
+        view = renderer("text")
         tool_input = {
             "questions": [
                 {
@@ -208,39 +225,315 @@ class TestCommands:
         assert is_command("/help")
         assert not is_command("help me")
 
-    def test_mode_and_model_change_the_next_turn(self, tmp_path: Path) -> None:
-        view, _ = renderer("text")
+    async def test_mode_and_model_change_the_next_turn(self, tmp_path: Path) -> None:
+        view = renderer("text")
         state = state_for(scripted([TextPart("x")]), tmp_path)
 
-        assert dispatch("/mode plan", state, view) == "continue"
-        assert dispatch("/model openai:gpt-5", state, view) == "continue"
+        assert await dispatch("/mode plan", state, view) == "continue"
+        assert await dispatch("/model openai:gpt-5", state, view) == "continue"
         assert state.options.permission_mode == "plan"
         assert state.options.model == "openai:gpt-5"
 
-    def test_invalid_mode_is_rejected(self, tmp_path: Path) -> None:
-        view, buffer = renderer("text")
+    async def test_invalid_mode_is_rejected(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
+        view = renderer("text")
         state = state_for(scripted([TextPart("x")]), tmp_path)
 
-        dispatch("/mode nonsense", state, view)
+        await dispatch("/mode nonsense", state, view)
         assert state.options.permission_mode == "default"
-        assert "must be one of" in buffer.getvalue()
+        assert "must be one of" in captured_console.getvalue()
 
-    def test_new_forgets_the_session(self, tmp_path: Path) -> None:
-        view, _ = renderer("text")
+    async def test_new_forgets_the_session(self, tmp_path: Path) -> None:
+        view = renderer("text")
         state = state_for(scripted([TextPart("x")]), tmp_path)
         state.session_id = "abc"
 
-        dispatch("/new", state, view)
+        await dispatch("/new", state, view)
         assert state.session_id is None
 
-    def test_exit_stops_the_loop(self, tmp_path: Path) -> None:
-        view, _ = renderer("text")
+    async def test_exit_stops_the_loop(self, tmp_path: Path) -> None:
+        view = renderer("text")
         state = state_for(scripted([TextPart("x")]), tmp_path)
-        assert dispatch("/exit", state, view) == "exit"
+        assert await dispatch("/exit", state, view) == "exit"
 
-    def test_unknown_command_is_not_sent_to_the_model(self, tmp_path: Path) -> None:
-        view, buffer = renderer("text")
+    async def test_unknown_command_is_not_sent_to_the_model(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
+        view = renderer("text")
         state = state_for(scripted([TextPart("x")]), tmp_path)
 
-        assert dispatch("/bogus", state, view) == "continue"
-        assert "unknown command" in buffer.getvalue()
+        assert await dispatch("/bogus", state, view) == "continue"
+        assert "unknown command" in captured_console.getvalue()
+
+
+class TestSetupWizard:
+    @pytest.fixture(autouse=True)
+    def home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the wizard at a throwaway home directory."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.delenv("UBIQUITY_MODEL", raising=False)
+        return tmp_path
+
+    def test_unconfigured_until_a_model_exists(self) -> None:
+        from ubiquity.cli.setup import is_configured, save_config
+
+        assert is_configured() is False
+        save_config({"model": "groq:openai/gpt-oss-120b"})
+        assert is_configured() is True
+
+    def test_env_var_alone_counts_as_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli.setup import is_configured
+
+        monkeypatch.setenv("UBIQUITY_MODEL", "openai:gpt-5")
+        assert is_configured() is True
+
+    def test_saving_preserves_hand_written_keys(self) -> None:
+        from ubiquity.cli.setup import config_path, load_config, save_config
+
+        config_path().parent.mkdir(parents=True, exist_ok=True)
+        config_path().write_text(
+            json.dumps({"permissions": {"deny": ["Bash(rm:*)"]}, "env": {"TZ": "UTC"}})
+        )
+        save_config({"model": "openai:gpt-5"})
+
+        stored = load_config()
+        assert stored["model"] == "openai:gpt-5"
+        assert stored["permissions"]["deny"] == ["Bash(rm:*)"]
+        assert stored["env"] == {"TZ": "UTC"}
+
+    def test_credential_check_names_the_variable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli.setup import credential_missing, env_var_for
+
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        assert env_var_for("groq:openai/gpt-oss-120b") == "GROQ_API_KEY"
+        assert credential_missing("groq:openai/gpt-oss-120b") == "GROQ_API_KEY"
+
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+        assert credential_missing("groq:openai/gpt-oss-120b") is None
+
+    def test_unknown_provider_asserts_nothing_about_credentials(self) -> None:
+        from ubiquity.cli.setup import credential_missing, env_var_for
+
+        assert env_var_for("some-local-thing:model") is None
+        assert credential_missing("some-local-thing:model") is None
+
+    async def test_wizard_writes_the_answers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import load_config, run_wizard
+
+        choices = iter(["groq", "groq:openai/gpt-oss-120b", "acceptEdits"])
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(choices))
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(iter([""])))
+        monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+
+        changes = await run_wizard(first_run=True)
+
+        assert changes["model"] == "groq:openai/gpt-oss-120b"
+        stored = load_config()
+        assert stored["model"] == "groq:openai/gpt-oss-120b"
+        assert stored["permissions"]["defaultMode"] == "acceptEdits"
+
+    async def test_abandoned_wizard_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import config_path, run_wizard
+
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(iter([""])))
+
+        assert await run_wizard() == {}
+        assert not config_path().exists()
+
+
+async def _reply(values: Any) -> str:
+    """Stand in for a `ui.ask_*` coroutine, returning the next scripted answer."""
+    return next(values)
+
+
+class TestKeyReader:
+    def test_control_characters_get_names(self) -> None:
+        from ubiquity.cli import keys
+
+        assert keys._name("\r") == keys.ENTER
+        assert keys._name("\n") == keys.ENTER
+        assert keys._name(" ") == keys.SPACE
+        assert keys._name("\x7f") == keys.BACKSPACE
+        assert keys._name("\x03") == keys.INTERRUPT
+        assert keys._name("k") == "k"
+
+    def test_both_arrow_encodings_are_recognized(self) -> None:
+        from ubiquity.cli import keys
+
+        assert keys._SEQUENCES["[A"] == keys.UP
+        assert keys._SEQUENCES["OA"] == keys.UP
+        assert keys._SEQUENCES["[B"] == keys.DOWN
+        assert keys._SEQUENCES["OB"] == keys.DOWN
+
+    def test_a_pipe_is_not_a_keyboard(self) -> None:
+        from ubiquity.cli import keys
+
+        assert keys.supported(io.StringIO()) is False
+
+
+class TestMenu:
+    def test_typing_narrows_the_list(self) -> None:
+        options = [("openai:gpt-5", "flagship"), ("groq:kimi", "strong at tools")]
+
+        visible, cursor = ui._filter(options, "groq", 1)
+        assert [row[0] for row in visible] == ["groq:kimi"]
+        assert cursor == 1
+
+        visible, _ = ui._filter(options, "flagship", 0)
+        assert [row[0] for row in visible] == ["openai:gpt-5"]
+
+        visible, _ = ui._filter(options, "", 0)
+        assert len(visible) == 2
+
+    async def test_without_a_tty_the_menu_falls_back_to_numbers(
+        self, monkeypatch: pytest.MonkeyPatch, captured_console: io.StringIO
+    ) -> None:
+        monkeypatch.setattr("builtins.input", lambda *a: "2")
+
+        picked = await ui.select(
+            "Which model?", [("openai:gpt-5", "flagship"), ("groq:kimi", "fast")]
+        )
+        assert picked == ["groq:kimi"]
+        assert "flagship" in captured_console.getvalue()
+
+    async def test_hotkey_falls_back_to_a_line_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("builtins.input", lambda *a: "a")
+        assert await ui.hotkey("allow?", accepted="yan", default="y") == "a"
+
+    async def test_multi_select_answers_join_with_commas(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from ubiquity.cli import prompts
+
+        async def picked(*args: Any, **kwargs: Any) -> list[str]:
+            return ["Markdown", "HTML"]
+
+        monkeypatch.setattr(prompts.ui, "select", picked)
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which formats?",
+                    "header": "formats",
+                    "options": [
+                        {"label": "JSON", "description": "machine"},
+                        {"label": "Markdown", "description": "readme"},
+                        {"label": "HTML", "description": "docs"},
+                    ],
+                    "multi_select": True,
+                }
+            ]
+        }
+        result = await terminal_handler(renderer("text"))(
+            "AskUserQuestion", tool_input, context_for(Options(cwd=tmp_path))
+        )
+        assert result.updated_input["answers"] == {"Which formats?": "Markdown, HTML"}
+
+
+class TestCompletion:
+    """Slash-command completion in the REPL input line."""
+
+    def complete(self, state: ReplState, text: str) -> list[tuple[str, str]]:
+        from prompt_toolkit.document import Document
+
+        from ubiquity.cli.completion import build_completer
+
+        completer = build_completer(state)
+        found = completer.get_completions(Document(text, len(text)), None)
+        return [(c.text, c.display_meta_text) for c in found]
+
+    def test_a_bare_slash_offers_every_command(self, tmp_path: Path) -> None:
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        offered = [name for name, _ in self.complete(state, "/")]
+        assert "/help" in offered
+        assert "/model" in offered
+        assert len(offered) == len(COMMANDS)
+
+    def test_completions_carry_what_the_command_does(self, tmp_path: Path) -> None:
+        """A list of bare names would be no more discoverable than /help."""
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        meta = dict(self.complete(state, "/"))
+        assert meta["/help"] == "show this list"
+
+    def test_the_offered_name_excludes_the_argument_placeholder(
+        self, tmp_path: Path
+    ) -> None:
+        """`/model <name>` is help text; completing it would insert junk."""
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert "/model" in [name for name, _ in self.complete(state, "/mod")]
+
+    def test_typing_narrows_the_list(self, tmp_path: Path) -> None:
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        offered = [name for name, _ in self.complete(state, "/mo")]
+        assert set(offered) == {"/model", "/mode"}
+
+    def test_plain_text_completes_to_nothing(self, tmp_path: Path) -> None:
+        """The completer must stay out of the way of ordinary prompts."""
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert self.complete(state, "what does this repo do") == []
+
+    def test_mode_completes_its_permission_modes(self, tmp_path: Path) -> None:
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        offered = [name for name, _ in self.complete(state, "/mode ")]
+        assert set(offered) == set(MODES)
+
+    def test_a_mode_argument_is_filtered_by_what_is_typed(
+        self, tmp_path: Path
+    ) -> None:
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert [n for n, _ in self.complete(state, "/mode acc")] == ["acceptEdits"]
+
+    def test_model_completes_from_the_wizard_suggestions(self, tmp_path: Path) -> None:
+        from ubiquity.cli.setup import SUGGESTED
+
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        offered = [name for name, _ in self.complete(state, "/model openai:")]
+        assert offered
+        assert all(name.startswith("openai:") for name in offered)
+        assert set(offered) <= {name for name, _ in SUGGESTED["openai"]}
+
+    def test_resume_completes_stored_sessions(self, tmp_path: Path) -> None:
+        """The ids are unguessable, so completion is the only usable path."""
+        from ubiquity import SessionStore
+
+        store = SessionStore(tmp_path / "sessions")
+        store.append("sess-abc", tmp_path, TextPart(content="hi"))
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        state.options.session_dir = tmp_path / "sessions"
+        assert "sess-abc" in [n for n, _ in self.complete(state, "/resume ")]
+
+    def test_a_command_with_no_argument_completes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert self.complete(state, "/cost ") == []
+
+    def test_the_reader_falls_back_when_there_is_no_terminal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Piped input and CI have no line editor; the REPL still has to run."""
+        from ubiquity.cli import completion
+
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        monkeypatch.setattr(
+            completion.LineReader, "_build", lambda self: setattr(self, "session", None)
+        )
+        reader = completion.LineReader(state)
+        assert reader.session is None
+
+    def test_history_lives_beside_the_settings(self) -> None:
+        from ubiquity.cli.completion import history_path
+
+        assert history_path().parent.name == ".ubiquity"

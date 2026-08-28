@@ -1,30 +1,55 @@
 """Slash commands for the interactive session.
 
 A command mutates the `ReplState` in place and reports what the loop should do
-next. Nothing here talks to the model: every command is a change to the
-options the *next* `summon()` call is given, which is what keeps the REPL a
-thin wrapper over the same one-shot path.
+next. Nothing here talks to the model: every command is a change to the options
+the *next* `summon()` call is given, which is what keeps the REPL a thin wrapper
+over the same one-shot path.
+
+`dispatch` is async because two of the commands -- `/setup` and `/key` -- put
+questions to the user, and everything that reads the terminal does so off the
+event loop thread.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.table import Table
+from rich.text import Text
+
 from ..options import Options
 from ..sessions.store import SessionStore
+from . import setup as setup_module
+from . import ui
 
 if TYPE_CHECKING:
     from .render import Renderer
 
-_MODES: tuple[str, ...] = (
+MODES: tuple[str, ...] = (
     "default",
     "acceptEdits",
     "bypassPermissions",
     "plan",
     "dontAsk",
+)
+
+COMMANDS: tuple[tuple[str, str], ...] = (
+    ("/help", "show this list"),
+    ("/model <name>", "switch model for the next turn"),
+    ("/mode <mode>", f"permission mode: {', '.join(MODES)}"),
+    ("/setup", "reconfigure provider, model, and default mode"),
+    ("/key", "set the provider credential for this shell"),
+    ("/new", "start a fresh session, forgetting the transcript"),
+    ("/resume <id>", "continue a stored session"),
+    ("/sessions", "list recent sessions for this directory"),
+    ("/cost", "what this session has cost so far"),
+    ("/cwd <path>", "change the working directory"),
+    ("/verbose", "toggle tool output and usage lines"),
+    ("/exit", "leave (Ctrl-D works too)"),
 )
 
 
@@ -39,25 +64,12 @@ class ReplState:
     history: list[str] = field(default_factory=list)
 
 
-HELP = """\
-  /help              show this list
-  /model <name>      switch model for the next turn
-  /mode <mode>       switch permission mode ({modes})
-  /new               start a fresh session, forgetting the transcript
-  /resume <id>       continue a stored session
-  /sessions          list recent sessions for this directory
-  /cost              total cost of this session so far
-  /cwd <path>        change the working directory
-  /exit              leave (Ctrl-D works too)\
-""".format(modes=", ".join(_MODES))
-
-
 def is_command(line: str) -> bool:
     """True when a line should be handled here rather than sent to the model."""
     return line.startswith("/")
 
 
-def dispatch(line: str, state: ReplState, renderer: Renderer) -> str:
+async def dispatch(line: str, state: ReplState, renderer: Renderer) -> str:
     """Run one slash command and return ``continue`` or ``exit``.
 
     Unknown commands are reported rather than forwarded, so a typo does not
@@ -70,64 +82,136 @@ def dispatch(line: str, state: ReplState, renderer: Renderer) -> str:
         return "exit"
 
     if name in ("help", "?", ""):
-        renderer.note(HELP, "dim")
+        _help()
     elif name == "model":
-        if not rest:
-            renderer.note(f"  model {state.options.resolved_model()}", "dim")
-        else:
-            state.options.model = rest
-            renderer.note(f"  model set to {rest}", "green")
+        await _model(rest, state)
     elif name == "mode":
-        if rest not in _MODES:
-            renderer.note(f"  mode must be one of: {', '.join(_MODES)}", "yellow")
-        else:
-            state.options.permission_mode = rest
-            renderer.note(f"  permission mode set to {rest}", "green")
+        await _mode(rest, state)
+    elif name == "setup":
+        changes = await setup_module.run_wizard()
+        if changes.get("model"):
+            state.options.model = changes["model"]
+            state.session_id = None
+    elif name == "key":
+        await _key(state)
     elif name in ("new", "clear"):
         state.session_id = None
         state.turns = 0
-        renderer.note("  started a new session", "green")
+        ui.note("  started a new session", "ok")
     elif name == "resume":
         if not rest:
-            renderer.note("  usage: /resume <session-id>", "yellow")
+            ui.note("  usage: /resume <session-id>", "warn")
         else:
             state.session_id = rest
-            renderer.note(f"  resuming {rest}", "green")
+            ui.note(f"  resuming {rest}", "ok")
     elif name == "sessions":
-        _list_sessions(state, renderer)
+        _sessions(state)
     elif name == "cost":
-        renderer.note(
-            f"  ${state.total_cost:.4f} over {state.turns} turns", "dim"
-        )
+        ui.note(f"  ${state.total_cost:.4f} over {state.turns} turns")
     elif name == "cwd":
-        if not rest:
-            renderer.note(f"  cwd {state.options.resolved_cwd()}", "dim")
-        else:
-            target = Path(rest).expanduser()
-            if not target.is_dir():
-                renderer.note(f"  no such directory: {target}", "yellow")
-            else:
-                state.options.cwd = target
-                state.session_id = None
-                renderer.note(f"  cwd set to {target}, session reset", "green")
+        _cwd(rest, state)
+    elif name == "verbose":
+        renderer.verbose = not renderer.verbose
+        ui.note(f"  verbose {'on' if renderer.verbose else 'off'}", "ok")
     else:
-        renderer.note(f"  unknown command: /{name} (try /help)", "yellow")
+        ui.note(f"  unknown command: /{name} (try /help)", "warn")
 
     return "continue"
 
 
-def _list_sessions(state: ReplState, renderer: Renderer) -> None:
+def _help() -> None:
+    table = Table.grid(padding=(0, 3))
+    table.add_column(style="brand")
+    table.add_column(style="muted")
+    for command, description in COMMANDS:
+        table.add_row(command, description)
+    ui.panel(table, title="commands")
+
+
+async def _model(rest: str, state: ReplState) -> None:
+    """Switch models, opening the picker when no name is given."""
+    if not rest:
+        rest = await _pick_model(state)
+        if not rest:
+            return
+    state.options.model = rest
+    ui.note(f"  model set to {rest}", "ok")
+    variable = setup_module.credential_missing(rest)
+    if variable:
+        ui.note(f"  {variable} is not set — /key to fix it", "warn")
+
+
+async def _mode(rest: str, state: ReplState) -> None:
+    """Switch permission mode, opening the picker when none is given."""
+    if not rest:
+        rest = await ui.ask_choice(
+            "Permission mode", list(setup_module.MODES)
+        )
+        if not rest:
+            return
+    if rest not in MODES:
+        ui.note(f"  mode must be one of: {', '.join(MODES)}", "warn")
+        return
+    state.options.permission_mode = rest
+    ui.note(f"  permission mode set to {rest}", "ok")
+
+
+async def _pick_model(state: ReplState) -> str:
+    """Offer this provider's models, plus a row for typing any other."""
+    current = str(state.options.model or "")
+    provider = current.split(":", 1)[0] if ":" in current else ""
+    options = list(setup_module.SUGGESTED.get(provider, ()))
+    for other, models in setup_module.SUGGESTED.items():
+        if other != provider:
+            options.extend(models)
+    return await ui.ask_choice("Which model?", options, allow_other=True)
+
+
+async def _key(state: ReplState) -> None:
+    """Set the provider credential for this process, and show how to persist it."""
+    model = state.options.model
+    variable = setup_module.env_var_for(str(model)) if model else None
+    if not variable:
+        variable = await ui.ask_text("  which environment variable")
+    if not variable:
+        return
+    value = await ui.ask_text(f"  {variable}", password=True)
+    if not value:
+        return
+    os.environ[variable] = value
+    ui.note(f"  {variable} set for this session", "ok")
+    setup_module.credential_help(variable, value)
+
+
+def _cwd(rest: str, state: ReplState) -> None:
+    if not rest:
+        ui.note(f"  cwd {state.options.resolved_cwd()}")
+        return
+    target = Path(rest).expanduser()
+    if not target.is_dir():
+        ui.note(f"  no such directory: {target}", "warn")
+        return
+    state.options.cwd = target
+    state.session_id = None
+    ui.note(f"  cwd set to {target}, session reset", "ok")
+
+
+def _sessions(state: ReplState) -> None:
     """Print recent sessions for the current directory."""
     store = SessionStore(state.options.session_dir)
     entries = store.list(state.options.resolved_cwd(), limit=10)
     if not entries:
-        renderer.note("  no stored sessions here", "dim")
+        ui.note("  no stored sessions here")
         return
     now = time.time()
+    table = Table.grid(padding=(0, 3))
+    table.add_column(style="brand")
+    table.add_column(style="muted", justify="right")
+    table.add_column()
     for entry in entries:
-        age = _age(now - entry.updated_at)
         label = entry.title or entry.summary or f"{entry.message_count} messages"
-        renderer.note(f"  {entry.session_id[:8]}  {age:>6}  {label[:60]}", "dim")
+        table.add_row(entry.session_id[:8], _age(now - entry.updated_at), label[:60])
+    ui.panel(table, title="sessions")
 
 
 def _age(seconds: float) -> str:

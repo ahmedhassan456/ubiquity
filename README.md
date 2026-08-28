@@ -129,21 +129,55 @@ Installing the package puts a `ubiquity` command on your path. It is a thin
 client over `summon()`: the same options, the same tools, the same session
 files.
 
+The first run has nothing to configure by hand — `ubiquity` notices there is no
+model set and opens a short wizard: provider, model, default permission mode.
+It writes your answers to `~/.ubiquity/settings.json`, which is the SDK's own
+user settings file, so anything else reading those files sees the same choice.
+Run it again any time with `ubiquity --setup`, or `/setup` inside a session.
+
+The API key is deliberately never written to disk. The wizard checks the
+environment variable your provider reads — `GROQ_API_KEY`, `ANTHROPIC_API_KEY`,
+and so on — and when it is missing it prints the `export` line for your shell
+profile. `/key` sets one for the current session.
+
 ```bash
+ubiquity                                # wizard on first run, then a session
 ubiquity "what python files are here?"
 ubiquity -m openai:gpt-5 --permission-mode acceptEdits "add type hints to models.py"
 ```
 
-Run it with no prompt and you get a REPL, which carries one session across
-turns. Slash commands change the options the next turn is given -- `/model`,
-`/mode`, `/new`, `/resume`, `/sessions`, `/cost`, `/cwd`, `/help`, `/exit`.
+Run it with no prompt and you get a REPL that carries one session across turns.
+Slash commands change the options the next turn is given:
 
-In the REPL every tool call that needs approval prompts inline, and
-`AskUserQuestion` renders as a numbered form you can answer by number or in
-your own words. Answering `a` allows that tool for the rest of the session.
+```
+/help  /model <name>  /mode <mode>  /setup  /key  /new  /resume <id>
+/sessions  /cost  /cwd <path>  /verbose  /exit
+```
 
-For scripts, `--print` runs without prompting -- there is nobody at the
-terminal to answer, so calls resolve against the permission rules alone -- and
+You do not have to know them: typing `/` completes, listing every command with
+what it does, and narrowing the text narrows the list. Arguments complete too,
+from what the process already knows — the permission modes for `/mode`, the
+wizard's models for `/model`, and for `/resume` the sessions actually stored for
+this directory, which are the only ids you could not have guessed. `↑` walks
+back through what you typed in earlier runs, kept in `~/.ubiquity/history`.
+
+Menus are navigated with the arrow keys: `↑`/`↓` to move, Enter to choose,
+Space to toggle when several answers are allowed, and typing filters the list —
+or becomes the answer itself, which is how a model identifier the CLI has never
+heard of gets entered. On anything that is not a real terminal (a pipe, CI, an
+editor pane that does not report itself as a tty) the same prompts fall back to
+numbered input, so nothing hangs waiting for a keypress that cannot arrive.
+
+Every tool call that needs approval opens an inline panel — a `Write` shows the
+content it would write, a `Bash` shows the command — answered with a single
+keypress, no Enter. `AskUserQuestion` renders as the same arrow-key form.
+Answering `a` allows that tool for the rest of the session, by writing the rule
+into the run's live permission context. Replies are rendered as markdown when
+the turn completes; `--stream` prints them as plain text as they arrive
+instead.
+
+For scripts, `--print` runs without prompting — there is nobody at the terminal
+to answer, so calls resolve against the permission rules alone — and
 `--output-format` picks the shape of the output:
 
 ```bash
@@ -155,14 +189,15 @@ ubiquity -p --output-format stream-json "refactor auth.py" | your-log-collector
 `json` prints the terminal result message; `stream-json` prints every
 `SDKMessage` as it arrives, one JSON object per line. `--continue` picks up the
 most recent session and `--resume <id>` picks up a named one, exactly as the
-`Options` fields of the same names do. Ctrl-C sets the run's abort event, so
-the turn stops at the next tool call and still reports a result; a second
-Ctrl-C gives up on that.
+`Options` fields of the same names do. Settings files are read by default here
+(`--sources ''` opts out), which is the difference between a host and a
+library. Ctrl-C sets the run's abort event, so the turn stops at the next tool
+call and still reports a result; a second Ctrl-C gives up on that.
 
-The CLI lives in `ubiquity.cli` and is built from the public API, so it doubles
-as a worked example of hosting the SDK: `render.py` consumes the message
-stream, `prompts.py` implements `can_use_tool`, and `main.py` owns the session
-lifecycle and signal handling.
+The CLI lives in `ubiquity.cli` and is built entirely from the public API, so
+it doubles as a worked example of hosting the SDK: `render.py` consumes the
+message stream, `prompts.py` implements `can_use_tool`, `setup.py` owns
+configuration, and `main.py` owns the session lifecycle and signal handling.
 
 ## The message stream
 

@@ -25,6 +25,8 @@ dependencies = [
     "anyio>=4.14.2",
     "groq>=1.6.0",
     "pydantic-ai>=2.16",
+    "prompt-toolkit>=3.0",
+    "rich>=13.0",
 ]
 
 [project.scripts]
