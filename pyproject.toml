@@ -27,6 +27,9 @@ dependencies = [
     "pydantic-ai>=2.16",
 ]
 
+[project.scripts]
+ubiquity = "ubiquity.cli.main:main"
+
 [project.urls]
 Homepage = "https://github.com/ahmedhassan456/ubiquity"
 Repository = "https://github.com/ahmedhassan456/ubiquity"

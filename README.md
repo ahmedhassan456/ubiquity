@@ -123,6 +123,47 @@ The full documentation lives at
 here is the tour; the docs site carries the complete API reference and the
 longer guides.
 
+## The CLI
+
+Installing the package puts a `ubiquity` command on your path. It is a thin
+client over `summon()`: the same options, the same tools, the same session
+files.
+
+```bash
+ubiquity "what python files are here?"
+ubiquity -m openai:gpt-5 --permission-mode acceptEdits "add type hints to models.py"
+```
+
+Run it with no prompt and you get a REPL, which carries one session across
+turns. Slash commands change the options the next turn is given -- `/model`,
+`/mode`, `/new`, `/resume`, `/sessions`, `/cost`, `/cwd`, `/help`, `/exit`.
+
+In the REPL every tool call that needs approval prompts inline, and
+`AskUserQuestion` renders as a numbered form you can answer by number or in
+your own words. Answering `a` allows that tool for the rest of the session.
+
+For scripts, `--print` runs without prompting -- there is nobody at the
+terminal to answer, so calls resolve against the permission rules alone -- and
+`--output-format` picks the shape of the output:
+
+```bash
+cat traceback.txt | ubiquity -p "what went wrong here?"
+ubiquity -p --output-format json "count the TODOs" | jq .total_cost_usd
+ubiquity -p --output-format stream-json "refactor auth.py" | your-log-collector
+```
+
+`json` prints the terminal result message; `stream-json` prints every
+`SDKMessage` as it arrives, one JSON object per line. `--continue` picks up the
+most recent session and `--resume <id>` picks up a named one, exactly as the
+`Options` fields of the same names do. Ctrl-C sets the run's abort event, so
+the turn stops at the next tool call and still reports a result; a second
+Ctrl-C gives up on that.
+
+The CLI lives in `ubiquity.cli` and is built from the public API, so it doubles
+as a worked example of hosting the SDK: `render.py` consumes the message
+stream, `prompts.py` implements `can_use_tool`, and `main.py` owns the session
+lifecycle and signal handling.
+
 ## The message stream
 
 `summon()` is an async generator. The first message is always a `system` message
