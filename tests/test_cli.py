@@ -534,6 +534,121 @@ def _stub_tags(
     monkeypatch.setattr(httpx, "get", get)
 
 
+class TestProviderList:
+    """The first wizard step offers every provider a model string can name."""
+
+    def test_every_known_provider_is_offered(self) -> None:
+        from ubiquity.cli.setup import providers
+        from ubiquity.models import known_providers
+
+        offered = [name for name, _ in providers()]
+        assert set(known_providers()) <= set(offered)
+        assert len(offered) == len(set(offered))
+
+    def test_the_featured_ones_come_first(self) -> None:
+        from ubiquity.cli.setup import FEATURED, providers
+
+        assert providers()[: len(FEATURED)] == list(FEATURED)
+
+    def test_the_rest_are_alphabetical(self) -> None:
+        from ubiquity.cli.setup import FEATURED, providers
+
+        rest = [name for name, _ in providers()[len(FEATURED) :]]
+        assert rest == sorted(rest)
+
+    def test_every_row_says_something(self) -> None:
+        from ubiquity.cli.setup import providers
+
+        assert all(description for _, description in providers())
+
+    def test_featured_providers_are_real(self) -> None:
+        """A provider offered by name has to be one pydantic-ai still answers to."""
+        from ubiquity.cli.setup import FEATURED, SUGGESTED
+        from ubiquity.models import known_providers
+
+        names = set(known_providers())
+        assert {name for name, _ in FEATURED} <= names
+        assert {model.split(":", 1)[0] for rows in SUGGESTED.values() for model, _ in rows} <= names
+
+    def test_a_gateway_provider_reads_the_gateway_key(self) -> None:
+        from ubiquity.cli.setup import env_var_for
+
+        assert env_var_for("gateway/groq:llama") == "PYDANTIC_AI_GATEWAY_API_KEY"
+
+    async def test_the_wizard_asks_once_and_takes_any_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Typing a provider is an answer, not a second prompt."""
+        from ubiquity.cli import setup as wizard
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        asked: list[str] = []
+        answers = iter(["nebius", "nebius:some-model", "default"])
+
+        async def ask_choice(question: str, options: Any, **kwargs: Any) -> str:
+            asked.append(question)
+            return next(answers)
+
+        monkeypatch.setattr(wizard.ui, "ask_choice", ask_choice)
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(answers))
+
+        assert (await wizard.run_wizard())["model"] == "nebius:some-model"
+        assert asked.count("Which provider?") == 1
+
+
+class TestMenuScrolling:
+    """A list longer than the terminal scrolls rather than overflowing it."""
+
+    def test_a_short_list_is_shown_whole(self) -> None:
+        assert ui.window(4, 0, 10) == (0, 4)
+        assert ui.window(10, 9, 10) == (0, 10)
+
+    def test_the_window_follows_the_cursor(self) -> None:
+        assert ui.window(30, 0, 10) == (0, 10)
+        assert ui.window(30, 4, 10) == (0, 10)
+        assert ui.window(30, 15, 10) == (10, 20)
+        assert ui.window(30, 29, 10) == (20, 30)
+
+    def test_the_window_never_leaves_the_list(self) -> None:
+        for cursor in range(30):
+            start, end = ui.window(30, cursor, 10)
+            assert 0 <= start <= cursor < end <= 30
+            assert end - start == 10
+
+    def test_a_long_menu_draws_a_window_and_says_what_is_hidden(self) -> None:
+        options = [(f"p{index}", "note") for index in range(30)]
+        drawn = _render(
+            ui._menu(
+                "Which provider?", options, 0, set(),
+                multi=False, allow_other=True, typed="",
+            )
+        )
+
+        assert "p0" in drawn and "p9" in drawn
+        assert "p10" not in drawn and "p29" not in drawn
+        assert "⋯ 21 more" in drawn
+
+    def test_the_typed_row_is_reachable_at_the_bottom(self) -> None:
+        options = [(f"p{index}", "note") for index in range(30)]
+        drawn = _render(
+            ui._menu(
+                "Which provider?", options, len(options), set(),
+                multi=False, allow_other=True, typed="",
+            )
+        )
+
+        assert "type something else…" in drawn
+        assert "p29" in drawn
+        assert "p0" not in drawn
+
+
+def _render(renderable: Any) -> str:
+    """Draw a renderable to a string, the way the menu would appear."""
+    buffer = io.StringIO()
+    ui.set_console(file=buffer, color=False, width=120).print(renderable)
+    return buffer.getvalue()
+
+
 class TestKeyReader:
     def test_control_characters_get_names(self) -> None:
         from ubiquity.cli import keys

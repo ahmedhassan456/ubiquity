@@ -36,20 +36,27 @@ OLLAMA_URL = "http://localhost:11434/v1"
 PROVIDER_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "openai-chat": "OPENAI_API_KEY",
     "groq": "GROQ_API_KEY",
-    "google-gla": "GOOGLE_API_KEY",
-    "google-vertex": "GOOGLE_APPLICATION_CREDENTIALS",
+    "google": "GOOGLE_API_KEY",
+    "google-cloud": "GOOGLE_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "cohere": "CO_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
-    "grok": "GROK_API_KEY",
+    "xai": "XAI_API_KEY",
+    "zai": "ZAI_API_KEY",
+    "moonshotai": "MOONSHOTAI_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
+    "huggingface": "HF_TOKEN",
+    "heroku": "HEROKU_INFERENCE_KEY",
+    "bedrock": "AWS_ACCESS_KEY_ID",
+    "azure": "AZURE_OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "together": "TOGETHER_API_KEY",
     "fireworks": "FIREWORKS_API_KEY",
-    "cerebras": "CEREBRAS_API_KEY",
-    "huggingface": "HF_TOKEN",
-    "bedrock": "AWS_ACCESS_KEY_ID",
-    "azure": "AZURE_OPENAI_API_KEY",
+    "github": "GITHUB_API_KEY",
+    "vercel": "VERCEL_AI_GATEWAY_API_KEY",
+    "gateway": "PYDANTIC_AI_GATEWAY_API_KEY",
     "ollama": OLLAMA_ENV,
 }
 """The environment variable each provider reads its credential from.
@@ -62,10 +69,26 @@ FEATURED = (
     ("anthropic", "Claude — strongest tool use"),
     ("openai", "GPT — broad availability"),
     ("groq", "open models, very fast"),
-    ("google-gla", "Gemini — long context"),
+    ("google", "Gemini — long context"),
     ("ollama", "local models, no key and no bill"),
 )
-"""Providers offered by name; the rest are reachable through 'other'."""
+"""The providers worth trying first, shown at the top of the list."""
+
+NOTES = {
+    "bedrock": "Claude and friends on AWS",
+    "cerebras": "open models on custom silicon",
+    "cohere": "Command",
+    "deepseek": "DeepSeek",
+    "google-cloud": "Gemini through Vertex AI",
+    "heroku": "Heroku managed inference",
+    "huggingface": "the Hub's inference providers",
+    "mistral": "Mistral",
+    "moonshotai": "Kimi",
+    "openai-chat": "OpenAI's older chat completions shape",
+    "xai": "Grok",
+    "zai": "GLM",
+}
+"""A word on the providers that are not featured, where a word helps."""
 
 SUGGESTED: dict[str, tuple[tuple[str, str], ...]] = {
     "anthropic": (
@@ -83,9 +106,9 @@ SUGGESTED: dict[str, tuple[tuple[str, str], ...]] = {
         ("groq:llama-3.3-70b-versatile", "general purpose"),
         ("groq:moonshotai/kimi-k2-instruct", "strong at tools"),
     ),
-    "google-gla": (
-        ("google-gla:gemini-2.5-pro", "flagship"),
-        ("google-gla:gemini-2.5-flash", "fast and cheap"),
+    "google": (
+        ("google:gemini-2.5-pro", "flagship"),
+        ("google:gemini-2.5-flash", "fast and cheap"),
     ),
 }
 """A short list per featured provider, so the common case is one keypress.
@@ -220,9 +243,15 @@ def is_configured() -> bool:
 
 
 def env_var_for(model: str) -> str | None:
-    """Return the credential variable a model string implies, if it is known."""
+    """Return the credential variable a model string implies, if it is known.
+
+    Every provider behind the gateway shares the gateway's own key, so a
+    ``gateway/...`` prefix falls back to the entry for the gateway itself.
+    """
     provider = model.split(":", 1)[0] if ":" in model else ""
-    return PROVIDER_ENV.get(provider)
+    if not provider:
+        return None
+    return PROVIDER_ENV.get(provider) or PROVIDER_ENV.get(provider.split("/", 1)[0])
 
 
 def credential_missing(model: str) -> str | None:
@@ -262,19 +291,33 @@ def credential_help(variable: str, value: str = "") -> None:
     ui.note("  then reopen the shell, or `source` that file", "muted")
 
 
-async def _choose_provider() -> str:
-    options = [*FEATURED, ("other", "any other pydantic-ai provider")]
-    choice = await ui.ask_choice(
-        "Which provider?", options, allow_other=True, default=1
-    )
-    if choice != "other":
-        return choice
+def _describes(name: str) -> str:
+    """The one-line note a provider row carries."""
+    if name.startswith("gateway/"):
+        return f"{name.split('/', 1)[1]} through the pydantic-ai gateway"
+    return NOTES.get(name) or PROVIDER_ENV.get(name, "")
 
+
+def providers() -> list[tuple[str, str]]:
+    """Every provider that can prefix a model, the featured ones first.
+
+    The list is the one `resolve_model` actually accepts rather than a
+    hand-kept copy of it, so a provider pydantic-ai gains shows up here without
+    anybody remembering to add it. Each row says what it is, or failing that
+    which variable it reads, since for most of them the credential is the only
+    question the user has.
+    """
     from ..models import known_providers
 
-    names = known_providers()
-    ui.note(f"  {len(names)} providers: {', '.join(names)}", "muted")
-    return await ui.ask_text("  provider")
+    featured = [name for name, _ in FEATURED]
+    rest = sorted(name for name in known_providers() if name not in featured)
+    return [*FEATURED, *((name, _describes(name)) for name in rest)]
+
+
+async def _choose_provider() -> str:
+    return await ui.ask_choice(
+        "Which provider?", providers(), allow_other=True, default=1
+    )
 
 
 async def _choose_ollama() -> str:
@@ -373,6 +416,7 @@ __all__ = [
     "credential_help",
     "env_var_for",
     "local_models",
+    "providers",
     "normalise_url",
     "ollama_url",
     "PROVIDER_ENV",

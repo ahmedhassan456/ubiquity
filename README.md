@@ -139,6 +139,11 @@ files.
 
 The first run has nothing to configure by hand — `ubiquity` notices there is no
 model set and opens a short wizard: provider, model, default permission mode.
+The provider step lists every prefix a model string can carry — the four worth
+trying first, then the rest alphabetically — and scrolls, so the list is the
+one `resolve_model` accepts rather than a shortlist with an "other" door at the
+end. Typing filters it, and a name the list has never heard of is still an
+answer.
 It writes your answers to `~/.ubiquity/settings.json`, which is the SDK's own
 user settings file, so anything else reading those files sees the same choice.
 Run it again any time with `ubiquity --setup`, or `/setup` inside a session.

@@ -192,6 +192,29 @@ async def ask_text(prompt: str, default: str = "", password: bool = False) -> st
         return ""
 
 
+MENU_ROWS = 10
+"""How many options a menu shows at once before it starts scrolling."""
+
+
+def menu_height() -> int:
+    """How many rows this terminal can spare for a menu's options."""
+    return max(4, min(MENU_ROWS, console().height - 8))
+
+
+def window(total: int, cursor: int, height: int) -> tuple[int, int]:
+    """Return the half-open range of rows to draw, keeping `cursor` inside it.
+
+    A list longer than the terminal has to move under a stationary cursor at
+    some point; doing it around the middle means the rows either side of the
+    selection stay visible, which is what makes a long list navigable rather
+    than merely scrollable.
+    """
+    if total <= height:
+        return 0, total
+    start = min(max(cursor - height // 2, 0), total - height)
+    return start, start + height
+
+
 def _menu(
     prompt: str,
     options: Sequence[tuple[str, str]],
@@ -209,7 +232,14 @@ def _menu(
     body.add_column(style="key")
     body.add_column(style="muted")
 
-    for index, (value, description) in enumerate(options):
+    total = len(options) + (1 if typed is not None else 0)
+    height = menu_height()
+    start, end = window(total, cursor, height)
+
+    if start:
+        body.add_row(Text(""), Text(""), Text(f"⋯ {start} more", style="muted"), Text(""))
+    for index in range(start, min(end, len(options))):
+        value, description = options[index]
         active = index == cursor
         mark = ""
         if multi:
@@ -221,12 +251,17 @@ def _menu(
             Text(description, style="muted"),
         )
 
-    if typed is not None:
+    if typed is not None and end > len(options):
         body.add_row(
             Text("❯" if cursor == len(options) else " ", style="brand"),
             Text(""),
             Text(typed or "type something else…", style="brand" if cursor == len(options) else "muted"),
             Text("", style="muted"),
+        )
+
+    if end < total:
+        body.add_row(
+            Text(""), Text(""), Text(f"⋯ {total - end} more", style="muted"), Text("")
         )
 
     keys_help = "↑↓ move · enter select"
