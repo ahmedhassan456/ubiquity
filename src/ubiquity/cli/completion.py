@@ -17,6 +17,8 @@ back to the plain prompt, so the REPL still runs where completion cannot.
 
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -50,9 +52,24 @@ def command_names() -> list[tuple[str, str]]:
 
 
 def _model_suggestions() -> list[tuple[str, str]]:
-    from .setup import SUGGESTED
+    """Every suggested model, with whatever Ollama has pulled first.
 
-    return [row for models in SUGGESTED.values() for row in models]
+    The local server is only asked once a session and only when its address is
+    set, so a user who has never touched Ollama pays nothing for this.
+    """
+    from .setup import OLLAMA_ENV, SUGGESTED
+
+    suggested = [row for models in SUGGESTED.values() for row in models]
+    if not os.environ.get(OLLAMA_ENV, "").strip():
+        return suggested
+    return [*_local_models(), *suggested]
+
+
+@lru_cache(maxsize=1)
+def _local_models() -> tuple[tuple[str, str], ...]:
+    from .setup import local_models
+
+    return local_models()
 
 
 def _session_suggestions(state: ReplState) -> list[tuple[str, str]]:

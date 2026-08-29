@@ -219,9 +219,19 @@ def known_models() -> list[str]:
     return list(known_model_names())
 
 
+EXTRA_PROVIDERS = ("ollama",)
+"""Providers that serve models pydantic-ai cannot enumerate by name.
+
+An Ollama server holds whatever its owner has pulled, so no published list can
+name those models -- but ``ollama:`` is a usable prefix all the same, and a
+provider missing from `known_providers` reads as a provider that is missing.
+"""
+
+
 def known_providers() -> list[str]:
     """Return the provider prefixes available for `provider:model` strings."""
-    return sorted({name.split(":")[0] for name in known_models() if ":" in name})
+    named = {name.split(":")[0] for name in known_models() if ":" in name}
+    return sorted(named | set(EXTRA_PROVIDERS))
 
 
 def model_name_of(model: str | Model, aliases: dict[str, str] | None = None) -> str:
@@ -236,6 +246,7 @@ def model_name_of(model: str | Model, aliases: dict[str, str] | None = None) -> 
 
 
 __all__ = [
+    "EXTRA_PROVIDERS",
     "resolve_model",
     "with_fallback",
     "openai_compatible",

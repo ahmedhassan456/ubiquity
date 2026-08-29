@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -361,6 +362,176 @@ class TestSetupWizard:
 async def _reply(values: Any) -> str:
     """Stand in for a `ui.ask_*` coroutine, returning the next scripted answer."""
     return next(values)
+
+
+class TestOllama:
+    """Ollama is the one provider whose models live on the user's machine."""
+
+    @pytest.fixture(autouse=True)
+    def home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.delenv("UBIQUITY_MODEL", raising=False)
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+        return tmp_path
+
+    def test_the_provider_is_offered_by_name(self) -> None:
+        from ubiquity.cli.setup import FEATURED
+
+        assert "ollama" in {name for name, _ in FEATURED}
+
+    def test_the_prefix_is_a_known_provider(self) -> None:
+        from ubiquity.models import known_providers
+
+        assert "ollama" in known_providers()
+
+    def test_the_address_stands_in_for_a_credential(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli.setup import OLLAMA_ENV, credential_missing, env_var_for
+
+        assert env_var_for("ollama:qwen3") == OLLAMA_ENV
+        assert credential_missing("ollama:qwen3") == OLLAMA_ENV
+
+        monkeypatch.setenv(OLLAMA_ENV, "http://localhost:11434/v1")
+        assert credential_missing("ollama:qwen3") is None
+
+    def test_any_shape_of_address_becomes_the_openai_endpoint(self) -> None:
+        from ubiquity.cli.setup import OLLAMA_URL, normalise_url
+
+        assert normalise_url("") == OLLAMA_URL
+        assert normalise_url("  ") == OLLAMA_URL
+        assert normalise_url("localhost:11434") == OLLAMA_URL
+        assert normalise_url("http://localhost:11434/") == OLLAMA_URL
+        assert normalise_url("http://localhost:11434/v1") == OLLAMA_URL
+        assert normalise_url("http://box.lan:1234") == "http://box.lan:1234/v1"
+
+    def test_pulled_models_are_read_from_the_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+
+        asked: list[str] = []
+        _stub_tags(monkeypatch, asked, [
+            {"model": "qwen3:latest", "size": 5_046_586_573, "details": {"parameter_size": "8B"}},
+            {"name": "llama3.2", "size": 0},
+            {"model": ""},
+        ])
+
+        assert wizard.local_models() == (
+            ("ollama:qwen3:latest", "8B · 5 GB"),
+            ("ollama:llama3.2", ""),
+        )
+        assert asked == ["http://localhost:11434/api/tags"]
+
+    def test_a_cloud_model_says_where_it_really_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+
+        _stub_tags(monkeypatch, [], [
+            {
+                "model": "kimi-k3:cloud",
+                "size": 308,
+                "remote_host": "https://ollama.com",
+                "details": {"parameter_size": "2.81T"},
+            },
+            {"model": "stub:cloud", "remote_host": "https://ollama.com",
+             "details": {"parameter_size": "0"}},
+        ])
+
+        assert wizard.local_models() == (
+            ("ollama:kimi-k3:cloud", "2.81T · via ollama.com"),
+            ("ollama:stub:cloud", "via ollama.com"),
+        )
+
+    def test_a_server_that_is_not_running_yields_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx
+
+        from ubiquity.cli import setup as wizard
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise httpx.ConnectError("nobody home")
+
+        monkeypatch.setattr(httpx, "get", refuse)
+        assert wizard.local_models() == ()
+
+    async def test_the_wizard_offers_what_is_pulled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import OLLAMA_ENV, load_config, run_wizard
+
+        offered: list[list[tuple[str, str]]] = []
+        choices = iter(["ollama", "ollama:qwen3:latest", "default"])
+
+        async def ask_choice(question: str, options: Any, **kwargs: Any) -> str:
+            offered.append(list(options))
+            return next(choices)
+
+        monkeypatch.setattr(wizard.ui, "ask_choice", ask_choice)
+        monkeypatch.setattr(
+            wizard.ui, "ask_text", lambda *a, **k: _reply(iter(["box.lan:11434"]))
+        )
+        _stub_tags(monkeypatch, [], [{"model": "qwen3:latest", "size": 0}])
+
+        changes = await run_wizard()
+
+        assert changes == {"model": "ollama:qwen3:latest"}
+        assert load_config()["model"] == "ollama:qwen3:latest"
+        assert os.environ[OLLAMA_ENV] == "http://box.lan:11434/v1"
+        assert ("ollama:qwen3:latest", "") in offered[1]
+
+    async def test_an_empty_server_still_lets_a_name_through(
+        self, monkeypatch: pytest.MonkeyPatch, captured_console: io.StringIO
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import run_wizard
+
+        choices = iter(["ollama", "default"])
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(choices))
+        answers = iter(["", "ollama:mistral"])
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(answers))
+        _stub_tags(monkeypatch, [], [])
+
+        assert (await run_wizard())["model"] == "ollama:mistral"
+        assert "no models answered" in captured_console.getvalue()
+
+    def test_local_models_reach_completion_once_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import completion
+        from ubiquity.cli.setup import OLLAMA_ENV
+
+        completion._local_models.cache_clear()
+        monkeypatch.setattr(
+            completion, "_local_models", lambda: (("ollama:qwen3", "8B"),)
+        )
+
+        assert ("ollama:qwen3", "8B") not in completion._model_suggestions()
+        monkeypatch.setenv(OLLAMA_ENV, "http://localhost:11434/v1")
+        assert completion._model_suggestions()[0] == ("ollama:qwen3", "8B")
+
+
+def _stub_tags(
+    monkeypatch: pytest.MonkeyPatch, asked: list[str], models: list[dict[str, Any]]
+) -> None:
+    """Answer the Ollama tags endpoint with `models`, recording the url asked."""
+    import httpx
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"models": models}
+
+    def get(url: str, **kwargs: Any) -> Response:
+        asked.append(url)
+        return Response()
+
+    monkeypatch.setattr(httpx, "get", get)
 
 
 class TestKeyReader:

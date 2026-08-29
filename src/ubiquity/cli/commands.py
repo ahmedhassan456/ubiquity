@@ -161,11 +161,18 @@ async def _mode(rest: str, state: ReplState) -> None:
     ui.note(f"  permission mode set to {rest}", "ok")
 
 
+def _ollama_configured() -> bool:
+    """True when the user has pointed the CLI at a local Ollama server."""
+    return bool(os.environ.get(setup_module.OLLAMA_ENV, "").strip())
+
+
 async def _pick_model(state: ReplState) -> str:
     """Offer this provider's models, plus a row for typing any other."""
     current = str(state.options.model or "")
     provider = current.split(":", 1)[0] if ":" in current else ""
     options = list(setup_module.SUGGESTED.get(provider, ()))
+    if provider == "ollama" or _ollama_configured():
+        options = [*setup_module.local_models(), *options]
     for other, models in setup_module.SUGGESTED.items():
         if other != provider:
             options.extend(models)
@@ -180,7 +187,9 @@ async def _key(state: ReplState) -> None:
         variable = await ui.ask_text("  which environment variable")
     if not variable:
         return
-    value = await ui.ask_text(f"  {variable}", password=True)
+    value = await ui.ask_text(
+        f"  {variable}", password=variable != setup_module.OLLAMA_ENV
+    )
     if not value:
         return
     os.environ[variable] = value

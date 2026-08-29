@@ -27,6 +27,12 @@ from rich.text import Text
 from ..settings import SETTINGS_DIR, SETTINGS_FILE
 from . import ui
 
+OLLAMA_ENV = "OLLAMA_BASE_URL"
+"""Where the Ollama provider reads the address of the local server."""
+
+OLLAMA_URL = "http://localhost:11434/v1"
+"""The address Ollama listens on out of the box."""
+
 PROVIDER_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -44,14 +50,20 @@ PROVIDER_ENV = {
     "huggingface": "HF_TOKEN",
     "bedrock": "AWS_ACCESS_KEY_ID",
     "azure": "AZURE_OPENAI_API_KEY",
+    "ollama": OLLAMA_ENV,
 }
-"""The environment variable each provider reads its credential from."""
+"""The environment variable each provider reads its credential from.
+
+Ollama is the odd one out: what it needs is an address, not a secret, so the
+wizard asks for it plainly and the value is safe to show.
+"""
 
 FEATURED = (
     ("anthropic", "Claude — strongest tool use"),
     ("openai", "GPT — broad availability"),
     ("groq", "open models, very fast"),
     ("google-gla", "Gemini — long context"),
+    ("ollama", "local models, no key and no bill"),
 )
 """Providers offered by name; the rest are reachable through 'other'."""
 
@@ -76,7 +88,11 @@ SUGGESTED: dict[str, tuple[tuple[str, str], ...]] = {
         ("google-gla:gemini-2.5-flash", "fast and cheap"),
     ),
 }
-"""A short list per featured provider, so the common case is one keypress."""
+"""A short list per featured provider, so the common case is one keypress.
+
+Ollama is absent on purpose: the only local models worth offering are the ones
+already pulled, so `local_models` asks the server instead of guessing.
+"""
 
 MODES = (
     ("default", "ask before anything that changes the world"),
@@ -84,6 +100,76 @@ MODES = (
     ("plan", "read-only; the agent can look but not touch"),
     ("bypassPermissions", "never ask — only in a sandbox you can lose"),
 )
+
+
+def ollama_url() -> str:
+    """The Ollama address in force: the environment's, or the default."""
+    return os.environ.get(OLLAMA_ENV, "").strip() or OLLAMA_URL
+
+
+def normalise_url(url: str) -> str:
+    """Return `url` as the OpenAI-compatible endpoint the provider expects.
+
+    Ollama serves its own API at the root and an OpenAI-shaped one under
+    ``/v1``. People type either, so both are accepted and one is stored.
+    """
+    trimmed = url.strip().rstrip("/")
+    if not trimmed:
+        return OLLAMA_URL
+    if "://" not in trimmed:
+        trimmed = f"http://{trimmed}"
+    return trimmed if trimmed.endswith("/v1") else f"{trimmed}/v1"
+
+
+def _size(count: Any) -> str:
+    try:
+        size = float(count)
+    except (TypeError, ValueError):
+        return ""
+    if size <= 0:
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _host(url: str) -> str:
+    """Name the machine a model is really served from, for a cloud tag."""
+    return f"via {url.split('://')[-1].strip('/')}"
+
+
+def local_models(url: str = "") -> tuple[tuple[str, str], ...]:
+    """Ask an Ollama server which models are pulled, newest first.
+
+    A server that is not running is not an error worth reporting here -- the
+    caller falls back to asking for a name -- so every failure is an empty
+    list.
+    """
+    import httpx
+
+    root = normalise_url(url or ollama_url()).removesuffix("/v1")
+    try:
+        response = httpx.get(f"{root}/api/tags", timeout=2.0)
+        response.raise_for_status()
+        listed = response.json().get("models", [])
+    except Exception:
+        return ()
+    rows: list[tuple[str, str]] = []
+    for entry in listed:
+        name = str(entry.get("model") or entry.get("name") or "").strip()
+        if not name:
+            continue
+        details = entry.get("details") or {}
+        parameters = str(details.get("parameter_size") or "").strip()
+        remote = str(entry.get("remote_host") or "").strip()
+        facts = [
+            parameters if parameters not in {"", "0"} else "",
+            _host(remote) if remote else _size(entry.get("size")),
+        ]
+        rows.append((f"ollama:{name}", " · ".join(fact for fact in facts if fact)))
+    return tuple(rows)
 
 
 def config_path() -> Path:
@@ -191,7 +277,26 @@ async def _choose_provider() -> str:
     return await ui.ask_text("  provider")
 
 
+async def _choose_ollama() -> str:
+    """Settle the address of the local server before anything is asked of it."""
+    url = normalise_url(await ui.ask_text("  ollama server", default=ollama_url()))
+    os.environ[OLLAMA_ENV] = url
+    return url
+
+
 async def _choose_model(provider: str) -> str:
+    if provider == "ollama":
+        pulled = local_models()
+        if not pulled:
+            ui.note(
+                f"  no models answered at {ollama_url()} — `ollama pull qwen3` first,"
+                " or name one anyway",
+                "warn",
+            )
+            return await ui.ask_text("  model identifier", default="ollama:")
+        return await ui.ask_choice(
+            "Which local model?", list(pulled), allow_other=True, default=1
+        )
     suggestions = SUGGESTED.get(provider)
     if not suggestions:
         return await ui.ask_text(
@@ -211,13 +316,15 @@ async def run_wizard(*, first_run: bool = False) -> dict[str, Any]:
     Returning the settings rather than reading them back is what lets the
     caller start a session in the same breath as configuring it.
     """
-    ui.banner("a coding agent on 600+ models, 22 providers")
+    ui.banner("a coding agent on 600+ models, 23 providers — local ones too")
     if first_run:
         ui.note("  No model configured yet — let's fix that.\n", "key")
 
     provider = await _choose_provider()
     if not provider:
         return {}
+    if provider == "ollama":
+        await _choose_ollama()
     model = await _choose_model(provider)
     if not model:
         return {}
@@ -237,7 +344,11 @@ async def run_wizard(*, first_run: bool = False) -> dict[str, Any]:
     )
 
     variable = credential_missing(model)
-    if variable:
+    if env_var_for(model) == OLLAMA_ENV:
+        os.environ[OLLAMA_ENV] = ollama_url()
+        ui.note(f"\n  serving from {ollama_url()} — no key needed", "ok")
+        credential_help(OLLAMA_ENV, ollama_url())
+    elif variable:
         ui.note(f"\n  {variable} is not set in this shell.", "warn")
         key = await ui.ask_text(f"  paste your {variable} (or leave blank)", password=True)
         if key:
@@ -261,5 +372,10 @@ __all__ = [
     "credential_missing",
     "credential_help",
     "env_var_for",
+    "local_models",
+    "normalise_url",
+    "ollama_url",
     "PROVIDER_ENV",
+    "OLLAMA_ENV",
+    "OLLAMA_URL",
 ]

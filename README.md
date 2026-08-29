@@ -24,7 +24,7 @@
 Everything a terminal coding agent needs — the agent loop, a built-in tool
 suite, a rule-based permission system, hooks, subagents, MCP, and session
 persistence — built against pydantic-ai's model layer, so the same agent runs on
-**604 models across 22 providers** instead of one.
+**604 models across 23 providers** instead of one.
 
 ```python
 import asyncio
@@ -64,7 +64,15 @@ Options(model="fast")
 `UBIQUITY_MODEL_ALIASES="fast=groq:llama-3.3-70b-versatile,big=openai:gpt-5"`
 does the same from the environment.
 
-For anything OpenAI-compatible that isn't a registered provider — Ollama, vLLM,
+Models on your own machine are ordinary models. Point `OLLAMA_BASE_URL` at the
+server and the prefix works like any other:
+
+```bash
+export OLLAMA_BASE_URL="http://localhost:11434/v1"
+ubiquity -m ollama:qwen3 "what changed in this repo today?"
+```
+
+For anything else OpenAI-compatible that isn't a registered provider — vLLM,
 LM Studio, OpenRouter, Together:
 
 ```python
@@ -139,6 +147,13 @@ The API key is deliberately never written to disk. The wizard checks the
 environment variable your provider reads — `GROQ_API_KEY`, `ANTHROPIC_API_KEY`,
 and so on — and when it is missing it prints the `export` line for your shell
 profile. `/key` sets one for the current session.
+
+Ollama is offered alongside the hosted providers, and it is the one that asks
+for an address rather than a key. Answer with the server's URL — Enter takes
+the default `http://localhost:11434/v1` — and the wizard asks that server which
+models you have actually pulled, so the list you choose from is your own
+machine's rather than a guess. Once `OLLAMA_BASE_URL` is set, those models
+appear in `/model` and its completion too.
 
 ```bash
 ubiquity                                # wizard on first run, then a session
