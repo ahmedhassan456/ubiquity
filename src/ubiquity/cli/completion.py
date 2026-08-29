@@ -6,6 +6,9 @@ narrowing the text narrows the list. Arguments complete too, because the
 values a command accepts are exactly the ones this process already knows --
 the permission modes, the models the wizard offers, the session ids on disk.
 
+An `@` completes paths instead, against the session's working directory, so
+mentioning a file is a few keystrokes rather than a remembered path.
+
 `prompt_toolkit` owns the line editor rather than `input()`, which is what
 makes any of that possible; it also brings arrow-key history for free. When
 there is no terminal to drive it -- a pipe, a test, CI -- `read_line` falls
@@ -20,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 from ..settings import SETTINGS_DIR
 from . import ui
 from .commands import COMMANDS
+from .mentions import SKIP_DIRECTORIES
 
 if TYPE_CHECKING:
     from .commands import ReplState
@@ -81,6 +85,45 @@ def argument_options(command: str, state: ReplState) -> list[tuple[str, str]]:
     return []
 
 
+def path_options(fragment: str, base: Path) -> list[tuple[str, str]]:
+    """Return the paths an `@fragment` could mean, directories first.
+
+    Noise directories are hidden until they are typed out, because a listing
+    whose first entries are `.git/` and `__pycache__/` is a listing nobody
+    reads. The same rule covers dotfiles: they appear once the dot is typed.
+    """
+    head, sep, tail = fragment.rpartition("/")
+    directory = (base / head).expanduser() if sep else base
+    try:
+        entries = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+    except OSError:
+        return []
+
+    found: list[tuple[str, str]] = []
+    for entry in entries:
+        if not entry.name.startswith(tail):
+            continue
+        if not tail and (entry.name.startswith(".") or entry.name in SKIP_DIRECTORIES):
+            continue
+        is_dir = entry.is_dir()
+        name = f"{head}{sep}{entry.name}" + ("/" if is_dir else "")
+        found.append((name, "directory" if is_dir else _size(entry)))
+    return found
+
+
+def _size(path: Path) -> str:
+    """Render a file's size for the completion menu."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    for unit in ("B", "K", "M"):
+        if size < 1024 or unit == "M":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return ""
+
+
 def build_completer(state: ReplState) -> Any:
     """Build the completer for one REPL session.
 
@@ -90,13 +133,24 @@ def build_completer(state: ReplState) -> Any:
     """
     from prompt_toolkit.completion import Completer, Completion
 
-    class SlashCompleter(Completer):
-        """Completes command names, then the argument the command takes."""
+    class ReplCompleter(Completer):
+        """Completes slash commands and their arguments, and `@path` mentions."""
 
         def get_completions(
             self, document: Any, complete_event: Any
         ) -> Iterable[Completion]:
             text = document.text_before_cursor
+            word = text.rpartition(" ")[2]
+            if word.startswith("@"):
+                fragment = word[1:]
+                for name, meta in path_options(fragment, state.options.resolved_cwd()):
+                    yield Completion(
+                        name,
+                        start_position=-len(fragment),
+                        display=name,
+                        display_meta=meta,
+                    )
+                return
             if not text.startswith("/"):
                 return
 
@@ -121,7 +175,7 @@ def build_completer(state: ReplState) -> Any:
                         display_meta=description,
                     )
 
-    return SlashCompleter()
+    return ReplCompleter()
 
 
 def _style() -> Any:
@@ -199,6 +253,7 @@ class LineReader:
 
 __all__ = [
     "LineReader",
+    "path_options",
     "build_completer",
     "command_names",
     "argument_options",

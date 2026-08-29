@@ -36,6 +36,7 @@ from ..settings import apply_settings
 from . import setup as setup_module
 from . import ui
 from .commands import ReplState, dispatch, is_command
+from . import mentions
 from .completion import LineReader
 from .prompts import terminal_handler
 from .render import OUTPUT_FORMATS, Renderer
@@ -230,8 +231,11 @@ async def _repl(state: ReplState, renderer: Renderer) -> int:
             continue
 
         state.history.append(line)
+        prompt, attached = mentions.expand(line, state.options.resolved_cwd())
+        for mention in attached:
+            renderer.note(f"  ⎘ {mentions.display(mention, state.options.resolved_cwd())}", "muted")
         try:
-            exit_code = await _run_turn(line, state, renderer, interactive=True)
+            exit_code = await _run_turn(prompt, state, renderer, interactive=True)
         except KeyboardInterrupt:
             renderer.note("  interrupted", "warn")
     return exit_code
@@ -310,6 +314,7 @@ async def _main(argv: list[str] | None = None) -> int:
         _warn_missing_credential(options)
 
     if prompt:
+        prompt, _ = mentions.expand(prompt, options.resolved_cwd())
         return await _run_turn(prompt, state, renderer, interactive=interactive)
     if not interactive:
         ui.note("ubiquity: no prompt given", "bad")

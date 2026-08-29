@@ -17,8 +17,8 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from ubiquity import Options
-from ubiquity.cli import ui
+from ubiquity import Options, SessionStore
+from ubiquity.cli import mentions, ui
 from ubiquity.cli.commands import COMMANDS, MODES, ReplState, dispatch, is_command
 from ubiquity.cli.main import _read_prompt, _run_turn, build_parser, options_from
 from ubiquity.cli.prompts import terminal_handler
@@ -537,3 +537,205 @@ class TestCompletion:
         from ubiquity.cli.completion import history_path
 
         assert history_path().parent.name == ".ubiquity"
+
+
+class TestMentions:
+    """`@path` in a prompt attaches the file it names."""
+
+    def test_a_mention_attaches_the_file(self, tmp_path: Path) -> None:
+        (tmp_path / "notes.md").write_text("remember the milk")
+        prompt, attached = mentions.expand("summarize @notes.md", tmp_path)
+        assert "remember the milk" in prompt
+        assert [m.reference for m in attached] == ["notes.md"]
+
+    def test_the_prompt_itself_is_left_intact(self, tmp_path: Path) -> None:
+        """The user's words stay first; the file follows as context."""
+        (tmp_path / "a.py") .write_text("x = 1")
+        prompt, _ = mentions.expand("fix @a.py please", tmp_path)
+        assert prompt.startswith("fix @a.py please")
+
+    def test_a_prompt_with_no_mention_is_untouched(self, tmp_path: Path) -> None:
+        prompt, attached = mentions.expand("what does this repo do", tmp_path)
+        assert prompt == "what does this repo do"
+        assert attached == []
+
+    def test_an_email_address_is_not_a_mention(self, tmp_path: Path) -> None:
+        """`@` is common in prose; only a leading-boundary one counts."""
+        prompt, attached = mentions.expand("mail me@example.com", tmp_path)
+        assert attached == []
+        assert prompt == "mail me@example.com"
+
+    def test_a_missing_path_is_reported_but_not_attached(self, tmp_path: Path) -> None:
+        found = mentions.find("read @ghost.py", tmp_path)
+        assert [m.kind for m in found] == ["missing"]
+        prompt, attached = mentions.expand("read @ghost.py", tmp_path)
+        assert attached == []
+        assert prompt == "read @ghost.py"
+
+    def test_a_directory_attaches_its_listing(self, tmp_path: Path) -> None:
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "mod.py").write_text("")
+        prompt, attached = mentions.expand("explore @pkg", tmp_path)
+        assert "mod.py" in prompt
+        assert [m.kind for m in attached] == ["directory"]
+
+    def test_a_binary_file_is_skipped(self, tmp_path: Path) -> None:
+        """Pasting a PNG into the prompt helps nobody and costs tokens."""
+        (tmp_path / "logo.png").write_bytes(b"\x89PNG\x00\x00binary")
+        prompt, attached = mentions.expand("look at @logo.png", tmp_path)
+        assert attached == []
+        assert prompt == "look at @logo.png"
+
+    def test_a_large_file_is_truncated_with_a_note(self, tmp_path: Path) -> None:
+        (tmp_path / "big.txt").write_text("y" * (mentions.MAX_FILE_BYTES + 500))
+        prompt, attached = mentions.expand("read @big.txt", tmp_path)
+        assert attached
+        assert "truncated" in prompt
+        assert len(prompt) < mentions.MAX_FILE_BYTES + 2_000
+
+    def test_the_same_file_twice_is_attached_once(self, tmp_path: Path) -> None:
+        (tmp_path / "a.py").write_text("x = 1")
+        prompt, attached = mentions.expand("diff @a.py against @a.py", tmp_path)
+        assert len(attached) == 1
+        assert prompt.count("Contents of") == 1
+
+    def test_an_absolute_path_is_attached(self, tmp_path: Path) -> None:
+        target = tmp_path / "abs.txt"
+        target.write_text("absolute")
+        prompt, attached = mentions.expand(f"see @{target}", tmp_path)
+        assert "absolute" in prompt
+        assert attached[0].path == target.resolve()
+
+    def test_trailing_punctuation_is_not_part_of_the_path(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "a.py").write_text("x = 1")
+        _, attached = mentions.expand("what is in @a.py?", tmp_path)
+        assert [m.reference for m in attached] == ["a.py"]
+
+
+class TestPathCompletion:
+    def complete(self, state: ReplState, text: str) -> list[str]:
+        from prompt_toolkit.document import Document
+
+        from ubiquity.cli.completion import build_completer
+
+        completer = build_completer(state)
+        return [c.text for c in completer.get_completions(Document(text, len(text)), None)]
+
+    def test_an_at_sign_offers_the_working_directory(self, tmp_path: Path) -> None:
+        (tmp_path / "alpha.py").write_text("")
+        (tmp_path / "pkg").mkdir()
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert set(self.complete(state, "read @")) == {"alpha.py", "pkg/"}
+
+    def test_typing_narrows_to_a_subdirectory(self, tmp_path: Path) -> None:
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / "mod.py").write_text("")
+        (tmp_path / "pkg" / "other.py").write_text("")
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert self.complete(state, "read @pkg/mo") == ["pkg/mod.py"]
+
+    def test_noise_directories_stay_hidden_until_typed(self, tmp_path: Path) -> None:
+        """A listing headed by `.git/` is a listing nobody reads."""
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "keep.py").write_text("")
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert self.complete(state, "@") == ["keep.py"]
+        assert self.complete(state, "@.g") == [".git/"]
+
+    def test_a_mention_completes_inside_a_slash_command_line(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "alpha.py").write_text("")
+        state = state_for(scripted([TextPart(content="hi")]), tmp_path)
+        assert self.complete(state, "/cwd @al") == ["alpha.py"]
+
+
+class TestCompact:
+    """`/compact` replaces the transcript with a summary and continues."""
+
+    def state(self, tmp_path: Path, model: Any) -> ReplState:
+        return ReplState(
+            options=Options(
+                model=model,
+                cwd=tmp_path,
+                session_dir=tmp_path / "sessions",
+                persist_todos=False,
+            )
+        )
+
+    async def seeded(self, tmp_path: Path, model: Any) -> ReplState:
+        state = self.state(tmp_path, model)
+        await _run_turn("hello", state, renderer(), interactive=False)
+        return state
+
+    async def test_compaction_starts_a_new_session_from_the_summary(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
+        state = await self.seeded(
+            tmp_path, scripted([TextPart(content="the moon is made of cheese")])
+        )
+        previous = state.session_id
+        await dispatch("/compact", state, renderer())
+
+        assert state.session_id != previous
+        store = SessionStore(tmp_path / "sessions")
+        records = store.read(state.session_id or "", tmp_path)
+        assert len(records) == 1
+        assert "cheese" in str(records[0].payload)
+
+    async def test_the_old_session_is_left_readable(self, tmp_path: Path) -> None:
+        """The summarized transcript is the only copy of what it summarized."""
+        state = await self.seeded(tmp_path, scripted([TextPart(content="ok")]))
+        previous = state.session_id or ""
+        await dispatch("/compact", state, renderer())
+        assert SessionStore(tmp_path / "sessions").read(previous, tmp_path)
+
+    async def test_a_session_with_no_turns_says_so(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
+        state = self.state(tmp_path, scripted([TextPart(content="ok")]))
+        await dispatch("/compact", state, renderer())
+        assert state.session_id is None
+        assert "nothing to compact" in captured_console.getvalue()
+
+    async def test_a_run_that_does_not_persist_cannot_compact(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
+        state = self.state(tmp_path, scripted([TextPart(content="ok")]))
+        state.options.persist_session = False
+        state.session_id = "made-up"
+        await dispatch("/compact", state, renderer())
+        assert "not persisting" in captured_console.getvalue()
+
+    async def test_a_focus_argument_reaches_the_summarizer(
+        self, tmp_path: Path
+    ) -> None:
+        """`/compact keep the API decisions` has to actually say that."""
+        seen: list[str] = []
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.append(str(getattr(messages[0], "instructions", "") or ""))
+            return ModelResponse(parts=[TextPart(content="summary")])
+
+        state = await self.seeded(tmp_path, FunctionModel(respond))
+        await dispatch("/compact focus on the API decisions", state, renderer())
+        assert any("API decisions" in text for text in seen)
+
+    async def test_a_failed_summary_leaves_the_session_alone(
+        self, tmp_path: Path, captured_console: io.StringIO
+    ) -> None:
+        state = await self.seeded(tmp_path, scripted([TextPart(content="ok")]))
+        previous = state.session_id
+
+        def explode(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise RuntimeError("provider is down")
+
+        state.options.compact_model = FunctionModel(explode)
+        await dispatch("/compact", state, renderer())
+        assert state.session_id == previous
+        assert "compaction failed" in captured_console.getvalue()
+
+    def test_compact_is_listed_in_the_help(self) -> None:
+        assert any(spec.startswith("/compact") for spec, _ in COMMANDS)

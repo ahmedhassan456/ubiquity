@@ -150,9 +150,23 @@ Run it with no prompt and you get a REPL that carries one session across turns.
 Slash commands change the options the next turn is given:
 
 ```
-/help  /model <name>  /mode <mode>  /setup  /key  /new  /resume <id>
-/sessions  /cost  /cwd <path>  /verbose  /exit
+/help  /model <name>  /mode <mode>  /setup  /key  /compact [focus]
+/new  /resume <id>  /sessions  /cost  /cwd <path>  /verbose  /exit
 ```
+
+`/compact` summarizes the session so far and continues from the summary, which
+is what to reach for when a long session starts to feel expensive. It writes
+the summary as a *new* session and points the next turn at it; the session it
+summarized is untouched on disk, so `/resume` can still reach the full
+transcript. An argument says what the summary must keep — `/compact keep the
+API decisions`.
+
+Naming a file with `@` attaches it. `explain @src/ubiquity/cli/main.py` puts
+that file's text in front of the model with the prompt, instead of spending a
+tool call and a round-trip on a path you already knew; `@` completes paths
+against the working directory, a directory attaches its listing, and a binary
+or missing path is left in the prompt as the plain reference it is. The syntax
+is the one memory files use, so `@path` means the same thing everywhere.
 
 You do not have to know them: typing `/` completes, listing every command with
 what it does, and narrowing the text narrows the list. Arguments complete too,

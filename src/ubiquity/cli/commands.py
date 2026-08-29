@@ -1,13 +1,14 @@
 """Slash commands for the interactive session.
 
 A command mutates the `ReplState` in place and reports what the loop should do
-next. Nothing here talks to the model: every command is a change to the options
-the *next* `summon()` call is given, which is what keeps the REPL a thin wrapper
-over the same one-shot path.
+next. Almost none of them talk to the model: a command is a change to the
+options the *next* `summon()` call is given, which is what keeps the REPL a
+thin wrapper over the same one-shot path. `/compact` is the exception, and it
+makes a summarizing call of its own rather than a run.
 
-`dispatch` is async because two of the commands -- `/setup` and `/key` -- put
-questions to the user, and everything that reads the terminal does so off the
-event loop thread.
+`dispatch` is async because several commands -- `/setup`, `/key`, `/compact` --
+put a question to the user or a request to a provider, and everything that
+reads the terminal does so off the event loop thread.
 """
 
 from __future__ import annotations
@@ -18,9 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.markdown import Markdown
 from rich.table import Table
-from rich.text import Text
 
+from ..compaction import COMPACTION_PROMPT, SUMMARY_TEMPLATE
 from ..options import Options
 from ..sessions.store import SessionStore
 from . import setup as setup_module
@@ -43,6 +45,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/mode <mode>", f"permission mode: {', '.join(MODES)}"),
     ("/setup", "reconfigure provider, model, and default mode"),
     ("/key", "set the provider credential for this shell"),
+    ("/compact [focus]", "summarize the session so far and continue from it"),
     ("/new", "start a fresh session, forgetting the transcript"),
     ("/resume <id>", "continue a stored session"),
     ("/sessions", "list recent sessions for this directory"),
@@ -92,6 +95,8 @@ async def dispatch(line: str, state: ReplState, renderer: Renderer) -> str:
         if changes.get("model"):
             state.options.model = changes["model"]
             state.session_id = None
+    elif name == "compact":
+        await _compact(rest, state, renderer)
     elif name == "key":
         await _key(state)
     elif name in ("new", "clear"):
@@ -181,6 +186,73 @@ async def _key(state: ReplState) -> None:
     os.environ[variable] = value
     ui.note(f"  {variable} set for this session", "ok")
     setup_module.credential_help(variable, value)
+
+
+async def _compact(rest: str, state: ReplState, renderer: Renderer) -> None:
+    """Replace the session transcript with a summary and continue from it.
+
+    The REPL keeps no history of its own -- each turn resumes the stored
+    session -- so compacting means writing a *new* session whose whole
+    transcript is the summary, and pointing the next turn at it. The old
+    session file is left alone: it is the only remaining copy of what was
+    summarized, and `/resume` can still reach it.
+
+    `rest` is passed to the summarizer as extra instruction, which is how you
+    say what the summary must not lose.
+    """
+    from uuid import uuid4
+
+    from ..compaction import summarize
+    from ..sessions.replay import history_from
+    from ..types import SDKUserMessage
+
+    if not state.session_id:
+        ui.note("  nothing to compact yet — this session has no turns", "warn")
+        return
+    if not state.options.persist_session:
+        ui.note("  nothing to compact: this run is not persisting a session", "warn")
+        return
+
+    cwd = state.options.resolved_cwd()
+    store = SessionStore(state.options.session_dir)
+    history = history_from(store.read(state.session_id, cwd))
+    if len(history) < 2:
+        ui.note("  nothing to compact yet — this session has no turns", "warn")
+        return
+
+    instructions = None
+    if rest:
+        instructions = (
+            f"{COMPACTION_PROMPT}\n\nThe user asks that the summary focus on: {rest}"
+        )
+
+    renderer.start_status("compacting")
+    try:
+        summary = await summarize(
+            history,
+            state.options.resolved_compact_model(),
+            instructions=instructions,
+            aliases=state.options.model_aliases,
+            provider_kwargs=state.options.provider_kwargs,
+        )
+    except Exception as error:
+        ui.note(f"  compaction failed: {error}", "bad")
+        return
+    finally:
+        renderer.stop_status()
+
+    compacted = str(uuid4())
+    store.append(
+        compacted,
+        cwd,
+        SDKUserMessage(
+            content=SUMMARY_TEMPLATE.format(summary=summary),
+            session_id=compacted,
+        ),
+    )
+    state.session_id = compacted
+    ui.panel(Markdown(summary), title="compacted")
+    ui.note(f"  {len(history)} messages summarized; continuing as {compacted}", "ok")
 
 
 def _cwd(rest: str, state: ReplState) -> None:
