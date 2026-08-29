@@ -167,11 +167,15 @@ def _ollama_configured() -> bool:
 
 
 async def _pick_model(state: ReplState) -> str:
-    """Offer this provider's models, plus a row for typing any other."""
+    """Offer this provider's models in full, then the pick of the others.
+
+    Typing filters the list, which is what makes a provider with a hundred
+    models a menu rather than a wall.
+    """
     current = str(state.options.model or "")
     provider = current.split(":", 1)[0] if ":" in current else ""
-    options = list(setup_module.SUGGESTED.get(provider, ()))
-    if provider == "ollama" or _ollama_configured():
+    options = setup_module.models_for(provider) if provider else []
+    if provider != "ollama" and _ollama_configured():
         options = [*setup_module.local_models(), *options]
     for other, models in setup_module.SUGGESTED.items():
         if other != provider:

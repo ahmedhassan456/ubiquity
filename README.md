@@ -24,7 +24,7 @@
 Everything a terminal coding agent needs — the agent loop, a built-in tool
 suite, a rule-based permission system, hooks, subagents, MCP, and session
 persistence — built against pydantic-ai's model layer, so the same agent runs on
-**604 models across 23 providers** instead of one.
+**604 models across 36 providers** instead of one.
 
 ```python
 import asyncio
@@ -144,6 +144,13 @@ trying first, then the rest alphabetically — and scrolls, so the list is the
 one `resolve_model` accepts rather than a shortlist with an "other" door at the
 end. Typing filters it, and a name the list has never heard of is still an
 answer.
+
+The model step works the same way: a few curated models first — which one is
+the sensible default, which is cheap — then everything else that provider
+publishes, taken from pydantic-ai's registry rather than a list kept by hand.
+Search is by words in any order, so `haiku 4-5` finds
+`anthropic:claude-haiku-4-5` and `groq llama` finds the Llamas. Rows that are
+not chat models are marked, and so are pinned snapshots.
 It writes your answers to `~/.ubiquity/settings.json`, which is the SDK's own
 user settings file, so anything else reading those files sees the same choice.
 Run it again any time with `ubiquity --setup`, or `/setup` inside a session.
@@ -154,8 +161,9 @@ and so on — and when it is missing it prints the `export` line for your shell
 profile. `/key` sets one for the current session.
 
 Ollama is offered alongside the hosted providers, and it is the one that asks
-for an address rather than a key. Answer with the server's URL — Enter takes
-the default `http://localhost:11434/v1` — and the wizard asks that server which
+for an address rather than a key. It shows the address it intends to use and
+takes `y` or Enter to keep it, another url typed in its place to change it, or
+`n` to be asked for one. Then the wizard asks that server which
 models you have actually pulled, so the list you choose from is your own
 machine's rather than a guess. Once `OLLAMA_BASE_URL` is set, those models
 appear in `/model` and its completion too.

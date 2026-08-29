@@ -322,6 +322,9 @@ def _select_blocking(
                 cursor = (cursor + 1) % max(limit, 1)
             elif key == keys.SPACE and multi and cursor < len(visible):
                 chosen.symmetric_difference_update({cursor})
+            elif key == keys.SPACE and typed is not None and not multi:
+                typed += " "
+                visible, cursor = _filter(options, typed, cursor)
             elif key == keys.ENTER:
                 if typed is not None and cursor == len(visible):
                     if typed:
@@ -346,14 +349,25 @@ def _select_blocking(
     return []
 
 
+def matches(row: tuple[str, str], typed: str) -> bool:
+    """True when every word typed appears somewhere in `row`.
+
+    Words rather than one substring, because the useful search over a list of
+    model identifiers is a couple of remembered fragments in whatever order
+    they come to mind -- ``haiku 4-5``, ``groq llama`` -- and none of those are
+    substrings of the name they are looking for.
+    """
+    haystack = f"{row[0]} {row[1]}".lower()
+    return all(word in haystack for word in typed.lower().split())
+
+
 def _filter(
     options: Sequence[tuple[str, str]], typed: str, cursor: int
 ) -> tuple[list[tuple[str, str]], int]:
     """Narrow the list to what the typed text matches, keeping the cursor sane."""
     if not typed:
         return list(options), min(cursor, max(len(options) - 1, 0))
-    needle = typed.lower()
-    visible = [row for row in options if needle in row[0].lower() or needle in row[1].lower()]
+    visible = [row for row in options if matches(row, typed)]
     return visible, min(cursor, len(visible))
 
 

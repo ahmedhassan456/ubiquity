@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,11 @@ PROVIDER_ENV = {
     "github": "GITHUB_API_KEY",
     "vercel": "VERCEL_AI_GATEWAY_API_KEY",
     "gateway": "PYDANTIC_AI_GATEWAY_API_KEY",
+    "alibaba": "ALIBABA_API_KEY",
+    "nebius": "NEBIUS_API_KEY",
+    "ovhcloud": "OVHCLOUD_API_KEY",
+    "sambanova": "SAMBANOVA_API_KEY",
+    "voyageai": "VOYAGE_API_KEY",
     "ollama": OLLAMA_ENV,
 }
 """The environment variable each provider reads its credential from.
@@ -74,7 +80,12 @@ FEATURED = (
 )
 """The providers worth trying first, shown at the top of the list."""
 
+EMBEDDING_ONLY = frozenset({"sentence-transformers", "voyageai"})
+"""Providers that serve embeddings, which no amount of prompting will answer."""
+
 NOTES = {
+    "alibaba": "Qwen",
+    "azure": "OpenAI on Azure",
     "bedrock": "Claude and friends on AWS",
     "cerebras": "open models on custom silicon",
     "cohere": "Command",
@@ -84,7 +95,13 @@ NOTES = {
     "huggingface": "the Hub's inference providers",
     "mistral": "Mistral",
     "moonshotai": "Kimi",
+    "fireworks": "open models, hosted",
+    "github": "GitHub Models",
+    "litellm": "your own LiteLLM proxy",
     "openai-chat": "OpenAI's older chat completions shape",
+    "openrouter": "many providers behind one key",
+    "together": "open models, hosted",
+    "vercel": "the Vercel AI gateway",
     "xai": "Grok",
     "zai": "GLM",
 }
@@ -310,7 +327,11 @@ def providers() -> list[tuple[str, str]]:
     from ..models import known_providers
 
     featured = [name for name, _ in FEATURED]
-    rest = sorted(name for name in known_providers() if name not in featured)
+    rest = sorted(
+        name
+        for name in known_providers()
+        if name not in featured and name not in EMBEDDING_ONLY
+    )
     return [*FEATURED, *((name, _describes(name)) for name in rest)]
 
 
@@ -320,37 +341,92 @@ async def _choose_provider() -> str:
     )
 
 
+SNAPSHOT = re.compile(r"-(\d{8}|\d{4}-\d{2}-\d{2}|v\d[\d.]*)$")
+"""The tail that marks a pinned release of a model rather than its moving name."""
+
+
+def _model_note(name: str) -> str:
+    """A word on a model the registry names but nobody described.
+
+    Only the rows worth warning about get one: a pin that will never improve,
+    and the safety and embedding models that share the namespace with the chat
+    models but cannot answer a prompt.
+    """
+    identifier = name.split(":", 1)[-1].lower()
+    if "guard" in identifier or "moderation" in identifier:
+        return "safety filter, not a chat model"
+    if "embed" in identifier or identifier.startswith("tts") or "whisper" in identifier:
+        return "not a chat model"
+    if SNAPSHOT.search(identifier):
+        return "pinned release"
+    return ""
+
+
+def models_for(provider: str) -> list[tuple[str, str]]:
+    """Every model `provider` offers, the ones worth trying first at the top.
+
+    The curated rows carry the judgement -- which model is the sensible default,
+    which is cheap -- and the registry supplies the rest, so choosing an
+    unusual model does not mean leaving the menu for a text prompt. Ollama is
+    its own case: what it serves is whatever the user has pulled.
+    """
+    if provider == "ollama":
+        return list(local_models())
+
+    from ..models import known_models
+
+    curated = list(SUGGESTED.get(provider, ()))
+    named = {name for name, _ in curated}
+    prefix = f"{provider}:"
+    rest = sorted(
+        name
+        for name in known_models()
+        if name.startswith(prefix) and name not in named
+    )
+    return [*curated, *((name, _model_note(name)) for name in rest)]
+
+
+KEPT = frozenset({"", "y", "yes", "ok", "keep"})
+"""Answers that mean 'the address already shown is the right one'."""
+
+CHANGED = frozenset({"n", "no"})
+"""Answers that mean 'not that one', without saying what instead."""
+
+
 async def _choose_ollama() -> str:
-    """Settle the address of the local server before anything is asked of it."""
-    url = normalise_url(await ui.ask_text("  ollama server", default=ollama_url()))
+    """Settle the address of the local server before anything is asked of it.
+
+    The prompt takes either answer to the same question: `y` or Enter keeps the
+    address it shows, and a url typed in its place is that answer too, so the
+    usual case is one keypress and the unusual one is still one prompt. `n`
+    earns the second prompt, since it says only that the address is wrong.
+    """
+    shown = ollama_url()
+    reply = await ui.ask_text(
+        f"  use {shown}? (y to keep, or type another url)", default="y"
+    )
+    if reply.lower() in CHANGED:
+        reply = await ui.ask_text("  ollama server url", default=OLLAMA_URL)
+    url = shown if reply.lower() in KEPT else normalise_url(reply)
     os.environ[OLLAMA_ENV] = url
+    ui.note(f"  using {url}", "muted")
     return url
 
 
 async def _choose_model(provider: str) -> str:
-    if provider == "ollama":
-        pulled = local_models()
-        if not pulled:
+    options = models_for(provider)
+    if not options:
+        if provider == "ollama":
             ui.note(
                 f"  no models answered at {ollama_url()} — `ollama pull qwen3` first,"
                 " or name one anyway",
                 "warn",
             )
-            return await ui.ask_text("  model identifier", default="ollama:")
-        return await ui.ask_choice(
-            "Which local model?", list(pulled), allow_other=True, default=1
-        )
-    suggestions = SUGGESTED.get(provider)
-    if not suggestions:
         return await ui.ask_text(
             f"  model identifier for {provider}", default=f"{provider}:"
         )
-    return await ui.ask_choice(
-        f"Which {provider} model?",
-        list(suggestions),
-        allow_other=True,
-        default=1,
-    )
+    question = "Which local model?" if provider == "ollama" else f"Which {provider} model?"
+    return await ui.ask_choice(question, options, allow_other=True, default=1)
 
 
 async def run_wizard(*, first_run: bool = False) -> dict[str, Any]:
@@ -359,7 +435,12 @@ async def run_wizard(*, first_run: bool = False) -> dict[str, Any]:
     Returning the settings rather than reading them back is what lets the
     caller start a session in the same breath as configuring it.
     """
-    ui.banner("a coding agent on 600+ models, 23 providers — local ones too")
+    from ..models import known_models
+
+    ui.banner(
+        f"a coding agent on {len(known_models())} models"
+        f" across {len(providers())} providers — local ones too"
+    )
     if first_run:
         ui.note("  No model configured yet — let's fix that.\n", "key")
 
@@ -416,6 +497,7 @@ __all__ = [
     "credential_help",
     "env_var_for",
     "local_models",
+    "models_for",
     "providers",
     "normalise_url",
     "ollama_url",

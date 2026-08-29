@@ -498,6 +498,73 @@ class TestOllama:
         assert (await run_wizard())["model"] == "ollama:mistral"
         assert "no models answered" in captured_console.getvalue()
 
+    async def test_the_address_is_confirmed_with_one_keypress(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import OLLAMA_ENV, OLLAMA_URL
+
+        asked: list[str] = []
+
+        async def ask_text(prompt: str, **kwargs: Any) -> str:
+            asked.append(prompt)
+            return "y"
+
+        monkeypatch.setattr(wizard.ui, "ask_text", ask_text)
+
+        assert await wizard._choose_ollama() == OLLAMA_URL
+        assert os.environ[OLLAMA_ENV] == OLLAMA_URL
+        assert len(asked) == 1
+        assert OLLAMA_URL in asked[0]
+
+    async def test_a_url_typed_at_the_prompt_is_the_answer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import OLLAMA_ENV
+
+        answers = iter(["box.lan:11434"])
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(answers))
+
+        assert await wizard._choose_ollama() == "http://box.lan:11434/v1"
+        assert os.environ[OLLAMA_ENV] == "http://box.lan:11434/v1"
+
+    async def test_declining_earns_a_second_prompt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+
+        answers = iter(["n", "http://gpu-box:11434"])
+        asked: list[str] = []
+
+        async def ask_text(prompt: str, **kwargs: Any) -> str:
+            asked.append(prompt)
+            return next(answers)
+
+        monkeypatch.setattr(wizard.ui, "ask_text", ask_text)
+
+        assert await wizard._choose_ollama() == "http://gpu-box:11434/v1"
+        assert len(asked) == 2
+
+    async def test_the_shown_address_is_the_one_already_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A server already configured is what the prompt offers to keep."""
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import OLLAMA_ENV
+
+        monkeypatch.setenv(OLLAMA_ENV, "http://gpu-box:11434/v1")
+        asked: list[str] = []
+
+        async def ask_text(prompt: str, **kwargs: Any) -> str:
+            asked.append(prompt)
+            return ""
+
+        monkeypatch.setattr(wizard.ui, "ask_text", ask_text)
+
+        assert await wizard._choose_ollama() == "http://gpu-box:11434/v1"
+        assert "http://gpu-box:11434/v1" in asked[0]
+
     def test_local_models_reach_completion_once_configured(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -538,12 +605,18 @@ class TestProviderList:
     """The first wizard step offers every provider a model string can name."""
 
     def test_every_known_provider_is_offered(self) -> None:
-        from ubiquity.cli.setup import providers
+        from ubiquity.cli.setup import EMBEDDING_ONLY, providers
         from ubiquity.models import known_providers
 
         offered = [name for name, _ in providers()]
-        assert set(known_providers()) <= set(offered)
+        assert set(known_providers()) - EMBEDDING_ONLY <= set(offered)
         assert len(offered) == len(set(offered))
+
+    def test_embedding_providers_are_left_out(self) -> None:
+        """Nothing that only makes vectors belongs in a list of chat models."""
+        from ubiquity.cli.setup import EMBEDDING_ONLY, providers
+
+        assert not EMBEDDING_ONLY & {name for name, _ in providers()}
 
     def test_the_featured_ones_come_first(self) -> None:
         from ubiquity.cli.setup import FEATURED, providers
@@ -583,7 +656,7 @@ class TestProviderList:
 
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         asked: list[str] = []
-        answers = iter(["nebius", "nebius:some-model", "default"])
+        answers = iter(["nebius", "nebius:some-model", "default", ""])
 
         async def ask_choice(question: str, options: Any, **kwargs: Any) -> str:
             asked.append(question)
@@ -647,6 +720,133 @@ def _render(renderable: Any) -> str:
     buffer = io.StringIO()
     ui.set_console(file=buffer, color=False, width=120).print(renderable)
     return buffer.getvalue()
+
+
+class TestModelList:
+    """A provider's whole catalogue is offered, with the curated rows on top."""
+
+    def test_the_curated_models_come_first(self) -> None:
+        from ubiquity.cli.setup import SUGGESTED, models_for
+
+        rows = models_for("anthropic")
+        assert rows[: len(SUGGESTED["anthropic"])] == list(SUGGESTED["anthropic"])
+
+    def test_the_registry_supplies_the_rest(self) -> None:
+        from ubiquity.cli.setup import models_for
+        from ubiquity.models import known_models
+
+        offered = {name for name, _ in models_for("groq")}
+        assert {name for name in known_models() if name.startswith("groq:")} <= offered
+
+    def test_nothing_is_listed_twice(self) -> None:
+        from ubiquity.cli.setup import models_for
+
+        for provider in ("anthropic", "openai", "groq", "google"):
+            names = [name for name, _ in models_for(provider)]
+            assert len(names) == len(set(names))
+
+    def test_rows_that_are_not_chat_models_say_so(self) -> None:
+        from ubiquity.cli.setup import models_for
+
+        notes = dict(models_for("groq"))
+        assert notes["groq:meta-llama/llama-guard-4-12b"] == "safety filter, not a chat model"
+        assert notes["groq:llama-3.1-8b-instant"] == ""
+
+    def test_a_pinned_release_is_marked(self) -> None:
+        from ubiquity.cli.setup import models_for
+
+        assert dict(models_for("anthropic"))["anthropic:claude-haiku-4-5-20251001"] == (
+            "pinned release"
+        )
+
+    def test_a_provider_the_registry_does_not_know_offers_nothing(self) -> None:
+        from ubiquity.cli.setup import models_for
+
+        assert models_for("openrouter") == []
+
+    def test_ollama_offers_what_is_pulled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ubiquity.cli import setup as wizard
+
+        monkeypatch.setattr(wizard, "local_models", lambda: (("ollama:qwen3", "8B"),))
+        assert wizard.models_for("ollama") == [("ollama:qwen3", "8B")]
+
+    async def test_an_unknown_provider_still_asks_for_a_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        choices = iter(["openrouter", "default"])
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(choices))
+        typed = iter(["openrouter:qwen/qwen3-coder", ""])
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(typed))
+
+        assert (await wizard.run_wizard())["model"] == "openrouter:qwen/qwen3-coder"
+
+
+class TestMenuSearch:
+    """Typing narrows a long menu by words, in any order."""
+
+    def test_a_word_matches_anywhere_in_the_row(self) -> None:
+        row = ("anthropic:claude-haiku-4-5", "cheap and quick")
+
+        assert ui.matches(row, "haiku")
+        assert ui.matches(row, "cheap")
+        assert ui.matches(row, "")
+
+    def test_words_may_arrive_in_any_order(self) -> None:
+        row = ("groq:moonshotai/kimi-k2-instruct", "strong at tools")
+
+        assert ui.matches(row, "kimi groq")
+        assert ui.matches(row, "tools kimi")
+        assert not ui.matches(row, "kimi openai")
+
+    def test_the_search_is_case_insensitive(self) -> None:
+        assert ui.matches(("openai:GPT-5", ""), "gpt")
+
+    def test_space_types_into_the_search_when_it_toggles_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A single-select menu has no use for space, so search gets it."""
+        from ubiquity.cli import keys
+
+        pressed = iter([keys.SPACE, *"4-5", keys.ENTER])
+        monkeypatch.setattr(keys, "read_key", lambda *a, **k: next(pressed))
+
+        picked = ui._select_blocking(
+            "Which model?",
+            [("anthropic:claude-haiku-4-5", ""), ("anthropic:claude-opus-4-1", "")],
+            multi=False,
+            allow_other=True,
+            default=0,
+        )
+
+        assert picked == ["anthropic:claude-haiku-4-5"]
+
+    def test_space_still_toggles_a_multi_select(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import keys
+
+        pressed = iter([keys.SPACE, keys.DOWN, keys.SPACE, keys.ENTER])
+        monkeypatch.setattr(keys, "read_key", lambda *a, **k: next(pressed))
+
+        picked = ui._select_blocking(
+            "Which tools?",
+            [("Read", ""), ("Write", ""), ("Bash", "")],
+            multi=True,
+            allow_other=False,
+            default=0,
+        )
+
+        assert picked == ["Read", "Write"]
+
+    def test_filtering_keeps_the_cursor_inside_what_is_left(self) -> None:
+        options = [(f"p{index}", "note") for index in range(30)]
+
+        visible, cursor = ui._filter(options, "p1", 25)
+        assert [name for name, _ in visible] == ["p1"] + [f"p1{d}" for d in range(10)]
+        assert cursor <= len(visible)
 
 
 class TestKeyReader:
