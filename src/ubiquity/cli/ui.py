@@ -67,20 +67,64 @@ def set_console(
     return _console
 
 
-BANNER = r"""
- _   _ _     _             _ _
-| | | | |__ (_) __ _ _   _(_) |_ _   _
-| | | | '_ \| |/ _` | | | | | __| | | |
-| |_| | |_) | | (_| | |_| | | |_| |_| |
- \___/|_.__/|_|\__, |\__,_|_|\__|\__, |
-                  |_|            |___/
-"""
+WORDMARK = """\
+██╗   ██╗██████╗ ██╗ ██████╗ ██╗   ██╗██╗████████╗██╗   ██╗
+██║   ██║██╔══██╗██║██╔═══██╗██║   ██║██║╚══██╔══╝╚██╗ ██╔╝
+██║   ██║██████╔╝██║██║   ██║██║   ██║██║   ██║    ╚████╔╝
+██║   ██║██╔══██╗██║██║▄▄ ██║██║   ██║██║   ██║     ╚██╔╝
+╚██████╔╝██████╔╝██║╚██████╔╝╚██████╔╝██║   ██║      ██║
+ ╚═════╝ ╚═════╝ ╚═╝ ╚══▀▀═╝  ╚═════╝ ╚═╝   ╚═╝      ╚═╝"""
+
+COMPACT = "∞ ubiquity"
+
+GRADIENT = ("#22d3ee", "#6366f1", "#a855f7", "#e879f9")
+
+BANNER_MIN_WIDTH = 62
+
+
+def _blend(start: str, end: str, ratio: float) -> str:
+    """Mix two ``#rrggbb`` colors, `ratio` of the way from `start` to `end`."""
+    pairs = zip(
+        (int(start[i : i + 2], 16) for i in (1, 3, 5)),
+        (int(end[i : i + 2], 16) for i in (1, 3, 5)),
+    )
+    return "#" + "".join(f"{round(a + (b - a) * ratio):02x}" for a, b in pairs)
+
+
+def shade(ratio: float, stops: Sequence[str] = GRADIENT) -> str:
+    """The gradient color at `ratio`, 0 at its left end and 1 at its right."""
+    ratio = min(max(ratio, 0.0), 1.0)
+    span = 1 / (len(stops) - 1)
+    index = min(int(ratio / span), len(stops) - 2)
+    return _blend(stops[index], stops[index + 1], (ratio - index * span) / span)
+
+
+def gradient(art: str, stops: Sequence[str] = GRADIENT) -> Text:
+    """Paint `art` left to right through `stops`, one color per column.
+
+    The whole block shares one horizontal ramp rather than each line carrying
+    its own, so the mark and the wordmark under it read as a single object --
+    which is the point of the logo they are drawn from.
+    """
+    lines = art.split("\n")
+    span = max((len(line) for line in lines), default=1) - 1 or 1
+    text = Text()
+    for row, line in enumerate(lines):
+        for column, character in enumerate(line):
+            text.append(character, style=shade(column / span, stops))
+        if row < len(lines) - 1:
+            text.append("\n")
+    return text
 
 
 def banner(subtitle: str = "") -> None:
-    """Draw the wordmark, used by the wizard and the top of the REPL."""
+    """Draw the mark and wordmark, used by the wizard and the top of the REPL.
+
+    A terminal too narrow for the wordmark gets the one-line form instead of a
+    wrapped one: art that wraps is worse than no art.
+    """
     view = console()
-    view.print(Text(BANNER.strip("\n"), style="banner"))
+    view.print(gradient(COMPACT if view.width < BANNER_MIN_WIDTH else WORDMARK))
     if subtitle:
         view.print(Text(f"  {subtitle}", style="muted"))
     view.print()
@@ -401,6 +445,8 @@ __all__ = [
     "console",
     "set_console",
     "banner",
+    "gradient",
+    "shade",
     "rule",
     "note",
     "panel",

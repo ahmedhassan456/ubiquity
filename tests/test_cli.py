@@ -820,3 +820,42 @@ class TestInputChrome:
 
         assert completable("explain @src/ub") is True
         assert completable("explain @src/ub and then") is False
+
+
+class TestBanner:
+    def test_the_wordmark_lines_are_one_width(self) -> None:
+        """A ragged block would tilt the gradient's ramp line by line."""
+        lines = ui.WORDMARK.split("\n")
+        assert len({len(line.rstrip()) for line in lines}) > 0
+        assert max(len(line) for line in lines) < ui.BANNER_MIN_WIDTH
+
+    def test_the_gradient_runs_from_the_first_stop_to_the_last(self) -> None:
+        assert ui.shade(0.0) == ui.GRADIENT[0]
+        assert ui.shade(1.0) == ui.GRADIENT[-1]
+
+    def test_a_mid_gradient_color_is_between_its_stops(self) -> None:
+        colour = ui.shade(0.5)
+        assert colour not in ui.GRADIENT
+        assert len(colour) == 7 and colour.startswith("#")
+
+    def test_every_character_of_the_art_is_painted(self) -> None:
+        painted = ui.gradient("ab\ncd")
+        assert painted.plain == "ab\ncd"
+        assert all(span.style for span in painted.spans)
+
+    def test_a_narrow_terminal_gets_the_one_line_mark(
+        self, captured_console: io.StringIO
+    ) -> None:
+        """Wrapped art is worse than no art."""
+        ui.set_console(file=captured_console, color=False, width=40)
+        ui.banner()
+        assert ui.COMPACT in captured_console.getvalue()
+        assert "██" not in captured_console.getvalue()
+
+    def test_a_wide_terminal_gets_the_wordmark(
+        self, captured_console: io.StringIO
+    ) -> None:
+        ui.banner("subtitle here")
+        output = captured_console.getvalue()
+        assert "██" in output
+        assert "subtitle here" in output
