@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .commands import ReplState
 
 HISTORY_FILE = "history"
+RULE_CHAR = "─"
 
 _ARGUMENT_HINTS: dict[str, str] = {
     "/mode": "permission mode",
@@ -179,19 +180,113 @@ def build_completer(state: ReplState) -> Any:
 
 
 def _style() -> Any:
-    """Match the completion menu to the CLI's own palette."""
+    """Match the completion menu and the input rules to the CLI's palette."""
     from prompt_toolkit.styles import Style
 
     return Style.from_dict(
         {
             "prompt": "bold #d75fd7",
+            "rule": "#5f5f5f",
             "completion-menu.completion": "bg:#1c1c1c #d0d0d0",
             "completion-menu.completion.current": "bg:#d75fd7 #000000 bold",
             "completion-menu.meta.completion": "bg:#1c1c1c #808080",
             "completion-menu.meta.completion.current": "bg:#af5faf #eeeeee",
-            "bottom-toolbar": "#808080 bg:#1c1c1c",
+            "bottom-toolbar": "#5f5f5f noreverse",
         }
     )
+
+
+def _width(default: int = 80) -> int:
+    """The terminal's current width, re-read on every draw so a resize lands."""
+    from prompt_toolkit.application.current import get_app
+
+    try:
+        return max(20, get_app().output.get_size().columns)
+    except Exception:
+        return default
+
+
+def completable(text: str) -> bool:
+    """True when `text` is a line the completer has anything to say about.
+
+    This gates completion-while-typing, and through it the space prompt_toolkit
+    reserves for the menu: reserving unconditionally would hold six blank lines
+    open under every ordinary prompt, pushing the closing rule away from the
+    input it is supposed to close.
+    """
+    return text.startswith("/") or text.rpartition(" ")[2].startswith("@")
+
+
+def _completable() -> Any:
+    """The filter form of `completable`, read on every keystroke and render."""
+    from prompt_toolkit.application.current import get_app
+    from prompt_toolkit.filters import Condition
+
+    @Condition
+    def check() -> bool:
+        return completable(get_app().current_buffer.document.text_before_cursor)
+
+    return check
+
+
+def _rule() -> Any:
+    """The line under the input, redrawn with the rest of the prompt."""
+    from prompt_toolkit.formatted_text import FormattedText
+
+    return FormattedText([("class:rule", RULE_CHAR * _width())])
+
+
+def _message() -> Any:
+    """The prompt itself: a rule, then the caret the user types after.
+
+    A callable rather than a value so the rule is re-measured on every draw,
+    which is what makes it still span the terminal after a resize.
+    """
+    from prompt_toolkit.formatted_text import FormattedText
+
+    return FormattedText(
+        [("class:rule", RULE_CHAR * _width()), ("", "\n"), ("class:prompt", "› ")]
+    )
+
+
+def adds_text(state: Any) -> bool:
+    """True when taking the first completion would change the line.
+
+    A menu that is still open over a line the user has finished typing offers
+    only what is already there; Enter has to submit in that case, not consume
+    the keypress inserting nothing.
+    """
+    if state is None or state.complete_index is not None or not state.completions:
+        return False
+    completion = state.completions[0]
+    typed = state.original_document.text_before_cursor[completion.start_position :]
+    return bool(completion.text != typed)
+
+
+def _bindings() -> Any:
+    """Make the first completion the one Enter takes.
+
+    prompt_toolkit opens the menu with nothing selected, so accepting the
+    obvious suggestion costs an arrow key first. Here Enter takes the first
+    entry when none is selected and the entry would actually add something --
+    that last part is what keeps Enter submitting a finished line whose menu
+    happens to still be open.
+    """
+    from prompt_toolkit.application.current import get_app
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.key_binding import KeyBindings
+
+    @Condition
+    def first_completion_is_useful() -> bool:
+        return adds_text(get_app().current_buffer.complete_state)
+
+    bindings = KeyBindings()
+
+    @bindings.add("enter", filter=first_completion_is_useful)
+    def _take_first(event: Any) -> None:
+        event.current_buffer.go_to_completion(0)
+
+    return bindings
 
 
 class LineReader:
@@ -226,8 +321,10 @@ class LineReader:
             self.session = PromptSession(
                 history=history,
                 completer=build_completer(self.state),
-                complete_while_typing=True,
+                complete_while_typing=_completable(),
+                key_bindings=_bindings(),
                 style=_style(),
+                bottom_toolbar=_rule,
                 reserve_space_for_menu=6,
             )
         except Exception:
@@ -242,17 +339,19 @@ class LineReader:
         if self.session is None:
             return await ui.ask_text("\n›")
 
-        from prompt_toolkit.formatted_text import HTML
-
         try:
-            line = await self.session.prompt_async(HTML("\n<b>› </b>"))
+            line = await self.session.prompt_async(_message)
         except KeyboardInterrupt:
+            ui.line()
             return ""
+        ui.line()
         return line.strip()
 
 
 __all__ = [
     "LineReader",
+    "completable",
+    "adds_text",
     "path_options",
     "build_completer",
     "command_names",

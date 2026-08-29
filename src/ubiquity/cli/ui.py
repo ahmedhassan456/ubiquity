@@ -32,6 +32,7 @@ THEME = Theme(
         "warn": "yellow",
         "bad": "bold red",
         "muted": "dim",
+        "rule": "grey37",
         "prompt.head": "bold yellow",
         "banner": "magenta",
         "key": "bold",
@@ -88,6 +89,15 @@ def banner(subtitle: str = "") -> None:
 def rule(title: str) -> None:
     """Draw a labelled horizontal rule."""
     console().rule(Text(title, style="muted"), style="muted")
+
+
+def line(style: str = "rule") -> None:
+    """Draw a plain full-width horizontal line.
+
+    The input is fenced by one of these above and below, so a prompt and its
+    answer read as a block rather than running into the turn before it.
+    """
+    console().print(Text("─" * console().width, style=style))
 
 
 def note(message: str, style: str = "muted") -> None:

@@ -62,6 +62,12 @@ def state_for(model: FunctionModel, cwd: Path, **kwargs: Any) -> ReplState:
     )
 
 
+def _completion(text: str, start_position: int) -> Any:
+    from prompt_toolkit.completion import Completion
+
+    return Completion(text, start_position=start_position)
+
+
 def context_for(options: Options) -> ToolContext:
     return ToolContext(
         cwd=options.resolved_cwd(),
@@ -739,3 +745,78 @@ class TestCompact:
 
     def test_compact_is_listed_in_the_help(self) -> None:
         assert any(spec.startswith("/compact") for spec, _ in COMMANDS)
+
+
+class TestInputChrome:
+    """The rules around the input line, and what Enter takes."""
+
+    def test_a_line_spans_the_console(self, captured_console: io.StringIO) -> None:
+        ui.line()
+        assert captured_console.getvalue().strip() == "─" * 120
+
+    def test_the_prompt_carries_a_rule_above_the_caret(self) -> None:
+        from ubiquity.cli.completion import _message
+
+        drawn = "".join(text for _, text in _message())
+        assert drawn.startswith("─")
+        assert drawn.endswith("\n› ")
+
+    def test_enter_takes_the_first_completion_when_it_would_add_text(self) -> None:
+        from prompt_toolkit.buffer import CompletionState
+        from prompt_toolkit.document import Document
+
+        from ubiquity.cli.completion import adds_text
+
+        state = CompletionState(
+            original_document=Document("/comp", 5),
+            completions=[_completion("/compact", -5)],
+        )
+        assert adds_text(state) is True
+
+    def test_enter_submits_a_line_the_menu_cannot_improve(self) -> None:
+        """A finished line whose menu is still open must still submit."""
+        from prompt_toolkit.buffer import CompletionState
+        from prompt_toolkit.document import Document
+
+        from ubiquity.cli.completion import adds_text
+
+        state = CompletionState(
+            original_document=Document("/compact", 8),
+            completions=[_completion("/compact", -8)],
+        )
+        assert adds_text(state) is False
+
+    def test_a_chosen_completion_is_left_alone(self) -> None:
+        from prompt_toolkit.buffer import CompletionState
+        from prompt_toolkit.document import Document
+
+        from ubiquity.cli.completion import adds_text
+
+        state = CompletionState(
+            original_document=Document("/mo", 3),
+            completions=[_completion("/model", -3), _completion("/mode", -3)],
+        )
+        state.complete_index = 1
+        assert adds_text(state) is False
+
+    def test_no_completions_means_no_interception(self) -> None:
+        from ubiquity.cli.completion import adds_text
+
+        assert adds_text(None) is False
+
+    def test_an_ordinary_prompt_reserves_no_menu_space(self) -> None:
+        """Reserved space would hold the closing rule off the input line."""
+        from ubiquity.cli.completion import completable
+
+        assert completable("what does this repo do") is False
+
+    def test_a_command_line_is_completable(self) -> None:
+        from ubiquity.cli.completion import completable
+
+        assert completable("/co") is True
+
+    def test_a_mention_in_progress_is_completable(self) -> None:
+        from ubiquity.cli.completion import completable
+
+        assert completable("explain @src/ub") is True
+        assert completable("explain @src/ub and then") is False
