@@ -36,6 +36,9 @@ THEME = Theme(
         "prompt.head": "bold yellow",
         "banner": "magenta",
         "key": "bold",
+        "thinking": "dim italic",
+        "thinking.head": "magenta",
+        "thinking.title": "bold italic",
     }
 )
 

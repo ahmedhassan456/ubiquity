@@ -6,11 +6,16 @@ reply as rendered markdown. `stream-json` writes one JSON object per message,
 which is what makes the CLI scriptable, and `json` stays quiet until the
 terminal `SDKResultMessage`.
 
-Two details are worth knowing. The spinner is stopped by anything that prints,
+Two details are worth knowing. The animation is stopped by anything that prints,
 including a permission prompt, because a live region and a cursor waiting for
 input cannot share a terminal. And `prompted` is set by the permission handler
 so an approved call is announced once rather than twice: the prompt already
 showed the tool and its input, and the header would only repeat it.
+
+Reasoning is drawn by `thinking.Stream`: dim indented prose under one header,
+streamed as it arrives when the model exposes it. It is chrome rather than
+answer, so it is written straight through and never re-rendered, and turning it
+off is a matter of not asking the SDK for partial messages at all.
 
 Assistant text is rendered as markdown once the turn is complete rather than
 streamed token by token. Markdown cannot be re-flowed after it is printed, so
@@ -20,17 +25,15 @@ the former for anyone who prefers watching it arrive.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
-import time
 from typing import Any
 
 from rich.markdown import Markdown
 from rich.text import Text
 
 from ..types import SDKMessage
-from . import ui
+from . import spinner, thinking, ui
 
 OUTPUT_FORMATS = ("text", "json", "stream-json")
 
@@ -112,17 +115,18 @@ class Renderer:
         *,
         verbose: bool = False,
         stream_text: bool = False,
+        show_thinking: bool = True,
     ) -> None:
         self.output_format = output_format
         self.verbose = verbose
         self.stream_text = stream_text
+        self.show_thinking = show_thinking
         self.session_id = ""
         self.prompted: str | None = None
-        self._status: Any = None
-        self._ticker: Any = None
-        self._label = "thinking"
-        self._started = 0.0
+        self._status: spinner.Working | None = None
         self._text_open = False
+        self._thinking: thinking.Stream | None = None
+        self._streamed = False
 
     @property
     def console(self) -> Any:
@@ -137,50 +141,41 @@ class Renderer:
         self.console.file.write(text)
         self.console.file.flush()
 
-    def start_status(self, label: str = "thinking") -> None:
-        """Show the working spinner, if this format has one.
+    def start_status(self, label: str = "") -> None:
+        """Show the working animation, if this format has one.
 
-        A ticker task counts the seconds up beside it. Waiting on a model with
-        no idea how long it has been waiting is the difference between a slow
-        run and an apparently hung one, and the elapsed time is the cheapest
-        way to tell them apart.
+        The animation counts the seconds up beside its label. Waiting on a
+        model with no idea how long it has been waiting is the difference
+        between a slow run and an apparently hung one, and the elapsed time is
+        the cheapest way to tell them apart -- and the rest of the caption says
+        which key ends the wait.
         """
         if self.output_format != "text" or self._status is not None:
             return
-        self._status = self.console.status(f"[muted]{label}…[/muted]", spinner="dots")
+        self._status = spinner.Working(self.console, label or spinner.word())
         self._status.start()
-        self._label = label
-        self._started = time.monotonic()
-        try:
-            self._ticker = asyncio.get_running_loop().create_task(self._tick())
-        except RuntimeError:
-            self._ticker = None
-
-    async def _tick(self) -> None:
-        """Refresh the spinner's label once a second while it is up."""
-        try:
-            while self._status is not None:
-                await asyncio.sleep(1.0)
-                if self._status is None:
-                    return
-                elapsed = int(time.monotonic() - self._started)
-                if elapsed:
-                    self._status.update(f"[muted]{self._label}… {elapsed}s[/muted]")
-        except asyncio.CancelledError:
-            pass
 
     def stop_status(self) -> None:
-        """Take the spinner down before anything else touches the terminal."""
-        if self._ticker is not None:
-            self._ticker.cancel()
-            self._ticker = None
+        """Take the animation down before anything else touches the terminal."""
         if self._status is not None:
             self._status.stop()
             self._status = None
 
+    def thinking(self) -> thinking.Stream:
+        """The reasoning writer for this run, built on first thought."""
+        if self._thinking is None:
+            self._thinking = thinking.Stream(self.console)
+        return self._thinking
+
+    def close_thinking(self) -> None:
+        """End an open reasoning block, wherever the next output came from."""
+        if self._thinking is not None:
+            self._thinking.close()
+
     def close_text(self) -> None:
-        """End an open streamed line, and clear the spinner."""
+        """End an open streamed line or thought, and clear the spinner."""
         self.stop_status()
+        self.close_thinking()
         if self._text_open:
             self.write("\n")
             self._text_open = False
@@ -248,18 +243,35 @@ class Renderer:
         self.start_status()
 
     def _delta(self, message: Any) -> None:
+        """Route one delta: reasoning to its own block, text to the line."""
         if message.block_type == "thinking":
-            if self.verbose:
-                self.stop_status()
-                self.console.print(Text(message.delta, style="muted"), end="")
-                self._text_open = True
+            if not self.show_thinking:
+                return
+            self.stop_status()
+            self.thinking().write(message.delta)
+            self._streamed = True
+            return
+        if not self.stream_text:
             return
         self.stop_status()
+        self.close_thinking()
         self.write(message.delta)
         self._text_open = True
 
+    def _thoughts(self, message: Any) -> None:
+        """Print the thinking of a turn that arrived whole rather than in deltas."""
+        if not self.show_thinking or self._streamed:
+            self._streamed = False
+            return
+        for block in message.content:
+            if block.get("type") == "thinking" and block.get("thinking"):
+                self.stop_status()
+                self.thinking().feed(block["thinking"])
+
     def _assistant(self, message: Any) -> None:
         """Print a completed turn as markdown, unless its deltas already went out."""
+        self._thoughts(message)
+        self.close_thinking()
         if self._text_open:
             self.close_text()
             return

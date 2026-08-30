@@ -25,6 +25,7 @@ from typing import Any
 from rich.syntax import Syntax
 from rich.text import Text
 
+from ..compaction import DEFAULT_CONTEXT_WINDOW
 from ..settings import SETTINGS_DIR, SETTINGS_FILE
 from . import ui
 
@@ -240,8 +241,8 @@ def save_config(changes: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     merged = load_config()
     for key, value in changes.items():
-        if key == "permissions" and isinstance(value, dict):
-            merged["permissions"] = {**merged.get("permissions", {}), **value}
+        if key in ("permissions", "pricing") and isinstance(value, dict):
+            merged[key] = {**merged.get(key, {}), **value}
         else:
             merged[key] = value
     path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
@@ -413,6 +414,73 @@ async def _choose_ollama() -> str:
     return url
 
 
+TOKEN_SUFFIXES = {"k": 1_000, "m": 1_000_000}
+"""How a window is usually written down, and what it means in tokens."""
+
+
+def parse_tokens(reply: str) -> int | None:
+    """Read a context window written the way people say it, or None.
+
+    ``200k``, ``200,000`` and ``200000`` are the same number, and a model's
+    window is quoted in all three, so all three are accepted.
+    """
+    cleaned = reply.strip().lower().replace(",", "").replace("_", "").replace(" ", "")
+    multiplier = TOKEN_SUFFIXES.get(cleaned[-1:], 1)
+    if multiplier > 1:
+        cleaned = cleaned[:-1]
+    try:
+        tokens = int(float(cleaned) * multiplier)
+    except ValueError:
+        return None
+    return tokens if tokens > 0 else None
+
+
+def parse_rate(reply: str) -> float | None:
+    """Read a dollars-per-million-tokens rate, or None if it is not one."""
+    cleaned = reply.strip().lstrip("$").replace(",", "").replace(" ", "")
+    try:
+        rate = float(cleaned)
+    except ValueError:
+        return None
+    return rate if rate >= 0 else None
+
+
+async def _describe_model(model: str) -> dict[str, Any]:
+    """Ask for the model's window and rates, both optional, and say why.
+
+    Neither number can be looked up: pydantic-ai publishes model names, not
+    windows or prices, and both change on a revision the CLI never sees. So the
+    choice is to ask the one person who knows, or to guess -- and the guesses
+    are what the explanation describes.
+    """
+    ui.console().print()
+    ui.note("  Two things about this model the CLI cannot look up:", "key")
+    ui.note(
+        "    context window — it compacts before the model rejects a turn, and"
+        f" without a number it assumes {DEFAULT_CONTEXT_WINDOW:,} tokens,"
+        " which compacts a large model early and a small one too late",
+        "muted",
+    )
+    ui.note(
+        "    price — /cost reports dollars only for a model it can price;"
+        " unpriced runs report tokens and nothing else",
+        "muted",
+    )
+    ui.note("    both optional — enter to skip, /setup again to fill them in", "muted")
+
+    entry: dict[str, Any] = {}
+    window = parse_tokens(await ui.ask_text("  context window (e.g. 200k)"))
+    if window:
+        entry["contextWindow"] = window
+
+    rate = parse_rate(await ui.ask_text("  input $ per million tokens"))
+    if rate is not None:
+        entry["input"] = rate
+        output = parse_rate(await ui.ask_text("  output $ per million tokens"))
+        entry["output"] = output if output is not None else rate
+    return entry
+
+
 async def _choose_model(provider: str) -> str:
     options = models_for(provider)
     if not options:
@@ -453,19 +521,28 @@ async def run_wizard(*, first_run: bool = False) -> dict[str, Any]:
     if not model:
         return {}
 
+    described = await _describe_model(model)
+
     mode = await ui.ask_choice(
         "How should permissions work by default?", list(MODES), default=1
     )
     changes: dict[str, Any] = {"model": model}
+    if described:
+        changes["pricing"] = {model: described}
     if mode and mode != "default":
         changes["permissions"] = {"defaultMode": mode}
 
     path = save_config(changes)
     ui.console().print()
-    ui.key_values(
-        [("model", model), ("mode", mode or "default"), ("saved to", str(path))],
-        title="configured",
-    )
+    rows = [("model", model), ("mode", mode or "default")]
+    if "contextWindow" in described:
+        rows.append(("context window", f"{described['contextWindow']:,} tokens"))
+    if "input" in described:
+        rows.append(
+            ("price", f"${described['input']}/M in · ${described['output']}/M out")
+        )
+    rows.append(("saved to", str(path)))
+    ui.key_values(rows, title="configured")
 
     variable = credential_missing(model)
     if env_var_for(model) == OLLAMA_ENV:

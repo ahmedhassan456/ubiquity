@@ -19,12 +19,17 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from ubiquity import Options, SessionStore
-from ubiquity.cli import mentions, ui
+from ubiquity.cli import mentions, spinner, thinking, ui
 from ubiquity.cli.commands import COMMANDS, MODES, ReplState, dispatch, is_command
 from ubiquity.cli.main import _read_prompt, _run_turn, build_parser, options_from
 from ubiquity.cli.prompts import terminal_handler
 from ubiquity.cli.render import Renderer
 from ubiquity.tool import PermissionContext, ToolContext
+from ubiquity.types import (
+    SDKAssistantMessage,
+    SDKPartialAssistantMessage,
+    SDKToolUseMessage,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -360,8 +365,12 @@ class TestSetupWizard:
 
 
 async def _reply(values: Any) -> str:
-    """Stand in for a `ui.ask_*` coroutine, returning the next scripted answer."""
-    return next(values)
+    """Stand in for a `ui.ask_*` coroutine, returning the next scripted answer.
+
+    A script that runs out answers nothing, which is what a user pressing enter
+    through the wizard's optional questions does.
+    """
+    return next(values, "")
 
 
 class TestOllama:
@@ -660,7 +669,7 @@ class TestProviderList:
 
         async def ask_choice(question: str, options: Any, **kwargs: Any) -> str:
             asked.append(question)
-            return next(answers)
+            return next(answers, "")
 
         monkeypatch.setattr(wizard.ui, "ask_choice", ask_choice)
         monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(answers))
@@ -847,6 +856,135 @@ class TestMenuSearch:
         visible, cursor = ui._filter(options, "p1", 25)
         assert [name for name, _ in visible] == ["p1"] + [f"p1{d}" for d in range(10)]
         assert cursor <= len(visible)
+
+
+class TestModelFacts:
+    """The window and the price are asked for, explained, and optional."""
+
+    @pytest.fixture(autouse=True)
+    def home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.delenv("UBIQUITY_MODEL", raising=False)
+        return tmp_path
+
+    def test_a_window_may_be_written_any_of_the_usual_ways(self) -> None:
+        from ubiquity.cli.setup import parse_tokens
+
+        assert parse_tokens("200k") == 200_000
+        assert parse_tokens("200,000") == 200_000
+        assert parse_tokens("200000") == 200_000
+        assert parse_tokens("1m") == 1_000_000
+        assert parse_tokens("1.5M") == 1_500_000
+
+    def test_a_window_that_is_not_a_number_is_no_answer(self) -> None:
+        from ubiquity.cli.setup import parse_tokens
+
+        assert parse_tokens("") is None
+        assert parse_tokens("skip") is None
+        assert parse_tokens("0") is None
+        assert parse_tokens("-5") is None
+
+    def test_a_rate_may_carry_a_dollar_sign(self) -> None:
+        from ubiquity.cli.setup import parse_rate
+
+        assert parse_rate("$3") == 3.0
+        assert parse_rate("0.15") == 0.15
+        assert parse_rate("0") == 0.0
+        assert parse_rate("") is None
+        assert parse_rate("free") is None
+
+    async def test_the_answers_are_saved_against_the_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import load_config, run_wizard
+
+        choices = iter(["anthropic", "anthropic:claude-haiku-4-5", "default"])
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(choices))
+        typed = iter(["200k", "1", "5"])
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(typed))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        changes = await run_wizard()
+
+        entry = changes["pricing"]["anthropic:claude-haiku-4-5"]
+        assert entry == {"contextWindow": 200_000, "input": 1.0, "output": 5.0}
+        assert load_config()["pricing"] == changes["pricing"]
+
+    async def test_skipping_both_writes_no_pricing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import load_config, run_wizard
+
+        choices = iter(["anthropic", "anthropic:claude-haiku-4-5", "default"])
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(choices))
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(iter([])))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        assert "pricing" not in await run_wizard()
+        assert "pricing" not in load_config()
+
+    async def test_a_window_alone_is_enough(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import run_wizard
+
+        choices = iter(["anthropic", "anthropic:claude-haiku-4-5", "default"])
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(choices))
+        typed = iter(["32k"])
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(typed))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        assert (await run_wizard())["pricing"] == {
+            "anthropic:claude-haiku-4-5": {"contextWindow": 32_000}
+        }
+
+    async def test_one_rate_given_prices_both_directions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Output left blank bills at the input rate rather than at nothing."""
+        from ubiquity.cli import setup as wizard
+
+        typed = iter(["", "2"])
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(typed))
+
+        assert await wizard._describe_model("acme:big") == {"input": 2.0, "output": 2.0}
+
+    async def test_the_reason_for_asking_is_given(
+        self, monkeypatch: pytest.MonkeyPatch, captured_console: io.StringIO
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.compaction import DEFAULT_CONTEXT_WINDOW
+
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(iter([])))
+
+        await wizard._describe_model("acme:big")
+
+        drawn = captured_console.getvalue()
+        assert "context window" in drawn and f"{DEFAULT_CONTEXT_WINDOW:,}" in drawn
+        assert "/cost" in drawn
+        assert "optional" in drawn
+
+    async def test_a_second_model_does_not_drop_the_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ubiquity.cli import setup as wizard
+        from ubiquity.cli.setup import load_config, run_wizard, save_config
+
+        save_config({"pricing": {"acme:small": {"input": 1.0}}})
+        choices = iter(["anthropic", "anthropic:claude-haiku-4-5", "default"])
+        monkeypatch.setattr(wizard.ui, "ask_choice", lambda *a, **k: _reply(choices))
+        typed = iter(["8k"])
+        monkeypatch.setattr(wizard.ui, "ask_text", lambda *a, **k: _reply(typed))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        await run_wizard()
+
+        stored = load_config()["pricing"]
+        assert stored["acme:small"] == {"input": 1.0}
+        assert stored["anthropic:claude-haiku-4-5"] == {"contextWindow": 8_000}
 
 
 class TestKeyReader:
@@ -1345,3 +1483,234 @@ class TestBanner:
         output = captured_console.getvalue()
         assert "██" in output
         assert "subtitle here" in output
+
+
+def _thinking_output(text: str, buffer: io.StringIO, *, chunk: int = 5) -> str:
+    """Stream `text` through a renderer in fragments and return what was drawn."""
+    renderer = Renderer("text")
+    for start in range(0, len(text), chunk):
+        renderer.handle(
+            SDKPartialAssistantMessage(
+                delta=text[start : start + chunk], block_type="thinking"
+            )
+        )
+    renderer.close_text()
+    return buffer.getvalue()
+
+
+class TestThinking:
+    """Reasoning is chrome: headed, indented, and never mistaken for the answer."""
+
+    def test_a_thought_is_headed_and_indented(
+        self, captured_console: io.StringIO
+    ) -> None:
+        output = _thinking_output("the model considers its options\n", captured_console)
+        assert thinking.HEADER in output
+        assert "  the model considers its options" in output
+
+    def test_words_are_not_split_across_the_fragments_they_arrive_in(
+        self, captured_console: io.StringIO
+    ) -> None:
+        """A console asked to wrap half a word has already broken it."""
+        ui.set_console(file=captured_console, color=False, width=40)
+        output = _thinking_output("considering " * 12 + "\n", captured_console, chunk=3)
+        for line in output.splitlines():
+            for word in line.split():
+                assert word == "considering" or word in thinking.HEADER
+
+    def test_a_line_wraps_before_it_reaches_the_edge(
+        self, captured_console: io.StringIO
+    ) -> None:
+        ui.set_console(file=captured_console, color=False, width=40)
+        output = _thinking_output("weighing the options " * 8 + "\n", captured_console)
+        body = [line for line in output.splitlines() if line.startswith("  ")]
+        assert len(body) > 1
+        assert all(len(line) <= 40 for line in body)
+
+    def test_a_heading_is_held_until_its_line_ends(
+        self, captured_console: io.StringIO
+    ) -> None:
+        """It is printed once, undecorated, rather than word by word with asterisks."""
+        output = _thinking_output("**Checking the config**\nthen reading it\n", captured_console)
+        assert "  Checking the config" in output
+        assert "**" not in output
+        assert "  then reading it" in output
+
+    def test_a_blank_line_survives_as_one_blank_line(
+        self, captured_console: io.StringIO
+    ) -> None:
+        output = _thinking_output("first\n\n\n\nsecond\n", captured_console)
+        assert "  first\n\n  second" in output
+
+    def test_a_thought_that_never_streamed_is_still_shown(
+        self, captured_console: io.StringIO
+    ) -> None:
+        renderer = Renderer("text")
+        renderer.handle(
+            SDKAssistantMessage(
+                content=[
+                    {"type": "thinking", "thinking": "a whole thought"},
+                    {"type": "text", "text": "the answer"},
+                ]
+            )
+        )
+        renderer.close_text()
+        output = captured_console.getvalue()
+        assert "a whole thought" in output
+        assert output.index("a whole thought") < output.index("the answer")
+
+    def test_a_streamed_thought_is_not_printed_twice(
+        self, captured_console: io.StringIO
+    ) -> None:
+        renderer = Renderer("text")
+        renderer.handle(
+            SDKPartialAssistantMessage(delta="a whole thought", block_type="thinking")
+        )
+        renderer.handle(
+            SDKAssistantMessage(
+                content=[
+                    {"type": "thinking", "thinking": "a whole thought"},
+                    {"type": "text", "text": "the answer"},
+                ]
+            )
+        )
+        renderer.close_text()
+        assert captured_console.getvalue().count("a whole thought") == 1
+
+    def test_hiding_it_hides_both_paths(self, captured_console: io.StringIO) -> None:
+        renderer = Renderer("text", show_thinking=False)
+        renderer.handle(
+            SDKPartialAssistantMessage(delta="private", block_type="thinking")
+        )
+        renderer.handle(
+            SDKAssistantMessage(
+                content=[
+                    {"type": "thinking", "thinking": "private"},
+                    {"type": "text", "text": "the answer"},
+                ]
+            )
+        )
+        renderer.close_text()
+        output = captured_console.getvalue()
+        assert "private" not in output
+        assert thinking.HEADER not in output
+        assert "the answer" in output
+
+    def test_a_tool_call_closes_the_block_it_interrupts(
+        self, captured_console: io.StringIO
+    ) -> None:
+        renderer = Renderer("text")
+        renderer.handle(
+            SDKPartialAssistantMessage(delta="deciding to read", block_type="thinking")
+        )
+        renderer.handle(
+            SDKToolUseMessage(
+                tool_name="Read", tool_input={"file_path": "a.py"}, tool_use_id="1"
+            )
+        )
+        output = captured_console.getvalue()
+        assert output.index("deciding to read") < output.index("Read")
+        assert "deciding to read  " not in output
+
+    def test_reply_deltas_are_ignored_unless_streaming_was_asked_for(
+        self, captured_console: io.StringIO
+    ) -> None:
+        """Partial messages are on for thinking; the reply still renders as markdown."""
+        renderer = Renderer("text")
+        renderer.handle(SDKPartialAssistantMessage(delta="par", block_type="text"))
+        renderer.handle(
+            SDKAssistantMessage(content=[{"type": "text", "text": "partial"}])
+        )
+        renderer.close_text()
+        assert captured_console.getvalue().count("par") == 1
+
+
+
+class TestThinkingSwitch:
+    def test_showing_reasoning_asks_for_the_deltas_that_carry_it(self) -> None:
+        args = build_parser().parse_args(["hi"])
+        assert options_from(args).include_partial_messages is True
+
+    def test_hiding_it_stops_asking(self) -> None:
+        args = build_parser().parse_args(["--no-thinking", "hi"])
+        assert options_from(args).include_partial_messages is False
+
+    def test_streaming_the_reply_still_asks_for_them(self) -> None:
+        args = build_parser().parse_args(["--no-thinking", "--stream", "hi"])
+        assert options_from(args).include_partial_messages is True
+
+    @pytest.mark.asyncio
+    async def test_the_toggle_moves_the_renderer_and_the_options(
+        self, captured_console: io.StringIO
+    ) -> None:
+        state = ReplState(options=Options(model="test", include_partial_messages=True))
+        renderer = Renderer("text")
+        await dispatch("/thinking", state, renderer)
+        assert renderer.show_thinking is False
+        assert state.options.include_partial_messages is False
+        await dispatch("/thinking", state, renderer)
+        assert renderer.show_thinking is True
+        assert state.options.include_partial_messages is True
+
+    @pytest.mark.asyncio
+    async def test_hiding_it_leaves_a_streamed_reply_alone(self) -> None:
+        state = ReplState(options=Options(model="test", include_partial_messages=True))
+        renderer = Renderer("text", stream_text=True)
+        await dispatch("/thinking", state, renderer)
+        assert renderer.show_thinking is False
+        assert state.options.include_partial_messages is True
+
+
+class TestSpinner:
+    """The waiting animation: brand furniture, and a pure function of its tick."""
+
+    def test_it_says_how_long_and_how_to_stop(self) -> None:
+        pulse = spinner.Pulse("pondering")
+        assert pulse.caption() == "pondering…"
+        assert pulse.caption(12) == "pondering… (12s · ctrl-c to interrupt)"
+
+    def test_a_frame_is_a_star_and_the_caption(self) -> None:
+        pulse = spinner.Pulse("pondering")
+        assert pulse.frame(0, 12).plain == "✶ pondering… (12s · ctrl-c to interrupt)"
+
+    def test_the_star_twinkles(self) -> None:
+        pulse = spinner.Pulse("waiting")
+        stars = {pulse.frame(tick).plain[0] for tick in range(len(spinner.STARS))}
+        assert stars == set(spinner.STARS)
+
+    def test_the_shine_moves_along_the_label(self) -> None:
+        """A different letter is lit at each step, which is the whole animation."""
+        lit = [
+            tuple(span.start for span in spinner.shimmer("considering", tick).spans
+                  if span.style != "muted")
+            for tick in range(0, 40, spinner.TRAVEL)
+        ]
+        assert len(set(lit)) > 1
+
+    def test_every_letter_is_drawn_exactly_once(self) -> None:
+        for tick in (0, 7, 31):
+            assert spinner.shimmer("considering", tick).plain == "considering"
+
+    def test_the_word_comes_from_the_list(self) -> None:
+        assert spinner.word() in spinner.WORDS
+
+    def test_it_leaves_nothing_behind(self, captured_console: io.StringIO) -> None:
+        """It is a live region, so a transcript that scrolls past has no frames in it."""
+        renderer = Renderer("text")
+        renderer.start_status()
+        renderer.stop_status()
+        assert captured_console.getvalue().strip() == ""
+
+    def test_a_second_start_does_not_stack_two_of_them(self) -> None:
+        renderer = Renderer("text")
+        renderer.start_status("working")
+        first = renderer._status
+        renderer.start_status("thinking")
+        assert renderer._status is first
+        renderer.stop_status()
+        assert renderer._status is None
+
+    def test_quiet_formats_have_no_animation(self) -> None:
+        renderer = Renderer("json")
+        renderer.start_status()
+        assert renderer._status is None

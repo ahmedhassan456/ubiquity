@@ -139,7 +139,7 @@ files.
 
 The first run has nothing to configure by hand — `ubiquity` notices there is no
 model set and opens a short wizard: provider, model, default permission mode.
-The provider step lists every prefix a model string can carry — the four worth
+The provider step lists every prefix a model string can carry — the five worth
 trying first, then the rest alphabetically — and scrolls, so the list is the
 one `resolve_model` accepts rather than a shortlist with an "other" door at the
 end. Typing filters it, and a name the list has never heard of is still an
@@ -151,6 +151,17 @@ publishes, taken from pydantic-ai's registry rather than a list kept by hand.
 Search is by words in any order, so `haiku 4-5` finds
 `anthropic:claude-haiku-4-5` and `groq llama` finds the Llamas. Rows that are
 not chat models are marked, and so are pinned snapshots.
+
+Then it asks for two numbers about that model that nothing can look up: the
+context window and the price per million tokens. Both are optional — Enter
+skips either one — but the wizard says what it loses without them. Compaction
+fires at a fraction of the window, so with no number it assumes 128,000 tokens
+and either compacts a 200k model far too early or lets a 32k one overflow. And
+`/cost` reports dollars only for a model it can price; an unpriced run reports
+tokens and stops there. The answers land under `pricing` in the same settings
+file and reach every run through `Options.model_pricing`, so `--setup` again is
+the way to fill them in later.
+
 It writes your answers to `~/.ubiquity/settings.json`, which is the SDK's own
 user settings file, so anything else reading those files sees the same choice.
 Run it again any time with `ubiquity --setup`, or `/setup` inside a session.
@@ -179,7 +190,7 @@ Slash commands change the options the next turn is given:
 
 ```
 /help  /model <name>  /mode <mode>  /setup  /key  /compact [focus]
-/new  /resume <id>  /sessions  /cost  /cwd <path>  /verbose  /exit
+/new  /resume <id>  /sessions  /cost  /cwd <path>  /verbose  /thinking  /exit
 ```
 
 `/compact` summarizes the session so far and continues from the summary, which
@@ -217,6 +228,21 @@ Answering `a` allows that tool for the rest of the session, by writing the rule
 into the run's live permission context. Replies are rendered as markdown when
 the turn completes; `--stream` prints them as plain text as they arrive
 instead.
+
+A model that reasons out loud has that reasoning shown while it is being
+written: one `✻ Thinking…` header, then dim indented prose that wraps at the
+terminal's width, with a summary heading in bold on its own line. It is drawn
+as chrome rather than answer, so it is easy to skip and impossible to mistake
+for the reply. Words are held until a space proves them complete, because text
+arriving in fragments is text a console will otherwise break in half. `/thinking`
+hides it for the rest of the session and `--no-thinking` for the run — either
+one also stops asking the model for the partial messages that carry it.
+
+While a turn is in flight the wait is drawn rather than borrowed: a twinkling
+star and a shine that travels the length of the label, both painted from the
+same gradient as the wordmark, with the elapsed seconds and `ctrl-c to
+interrupt` beside it. It is a live region, so nothing of it survives in the
+scrollback.
 
 For scripts, `--print` runs without prompting — there is nobody at the terminal
 to answer, so calls resolve against the permission rules alone — and
@@ -1156,6 +1182,9 @@ Options(setting_sources=["project", "local"])
 {
   "model": "openai:gpt-5",
   "env": {"NO_COLOR": "1"},
+  "pricing": {
+    "openai:gpt-5": {"input": 1.25, "output": 10.0, "contextWindow": 400000}
+  },
   "permissions": {
     "deny": ["Bash(rm:*)"],
     "ask": ["Bash(git push:*)"],
@@ -1163,6 +1192,12 @@ Options(setting_sources=["project", "local"])
   }
 }
 ```
+
+`pricing` keys are the same substring patterns `model_pricing` takes, and the
+same fields: `input`, `output`, `cacheRead`, `cacheWrite`, `contextWindow`,
+with the rates in dollars per million tokens. It is merged pattern by pattern
+across the three files, and a table passed to `Options` wins over all of them.
+A malformed entry is dropped with a warning rather than failing the run.
 
 Local beats project beats user, and explicit `Options` beat all three — except
 for permission rules, which are unioned. A rule in a settings file is a

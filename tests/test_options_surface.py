@@ -596,3 +596,70 @@ def test_every_caller_facing_field_is_read_somewhere() -> None:
         if (found := unread_fields(cls, module))
     }
     assert not unread, f"declared but never read: {unread}"
+
+
+def test_a_settings_file_can_price_a_model(tmp_path: Path) -> None:
+    """The wizard's answers about a model reach the run that uses it."""
+    _write_settings(
+        settings_path("project", tmp_path),
+        {
+            "model": "acme:big",
+            "pricing": {
+                "acme:big": {"input": 3.0, "output": 15.0, "contextWindow": 200_000}
+            },
+        },
+    )
+    applied = apply_settings(Options(cwd=tmp_path, setting_sources=["project"]))
+
+    priced = applied.pricing_for("acme:big")
+    assert priced is not None
+    assert (priced.input, priced.output) == (3.0, 15.0)
+    assert applied.resolved_context_window("acme:big") == 200_000
+
+
+def test_a_runs_own_prices_win_over_the_file(tmp_path: Path) -> None:
+    from ubiquity.pricing import ModelPricing
+
+    _write_settings(
+        settings_path("project", tmp_path),
+        {"pricing": {"acme:big": {"input": 3.0, "output": 15.0}}},
+    )
+    applied = apply_settings(
+        Options(
+            cwd=tmp_path,
+            setting_sources=["project"],
+            model_pricing={"acme:big": ModelPricing(input=1.0, output=2.0)},
+        )
+    )
+
+    priced = applied.pricing_for("acme:big")
+    assert priced is not None
+    assert (priced.input, priced.output) == (1.0, 2.0)
+
+
+def test_local_prices_override_project_prices(tmp_path: Path) -> None:
+    _write_settings(
+        settings_path("project", tmp_path),
+        {"pricing": {"acme:big": {"input": 3.0}, "acme:small": {"input": 1.0}}},
+    )
+    _write_settings(
+        settings_path("local", tmp_path),
+        {"pricing": {"acme:big": {"input": 9.0}}},
+    )
+    applied = apply_settings(
+        Options(cwd=tmp_path, setting_sources=["project", "local"])
+    )
+
+    assert applied.model_pricing["acme:big"].input == 9.0
+    assert applied.model_pricing["acme:small"].input == 1.0
+
+
+def test_a_malformed_price_is_dropped_not_raised(tmp_path: Path) -> None:
+    """Ambient configuration must not be able to stop a run that would work."""
+    _write_settings(
+        settings_path("project", tmp_path),
+        {"pricing": {"acme:big": "free", "acme:small": {"input": "a lot"}}},
+    )
+    applied = apply_settings(Options(cwd=tmp_path, setting_sources=["project"]))
+
+    assert applied.model_pricing == {}

@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .options import Options, SettingSource
+    from .pricing import ModelPricing
 
 logger = logging.getLogger("ubiquity.settings")
 
@@ -81,6 +82,7 @@ def load_settings(
     merged: dict[str, Any] = {}
     permissions: dict[str, list[str]] = {}
     env: dict[str, str] = {}
+    pricing: dict[str, Any] = {}
 
     for source in ORDER:
         if source not in sources:
@@ -97,6 +99,8 @@ def load_settings(
                         merged.setdefault("permissions", {})[rule_key] = rules
             elif key == "env" and isinstance(value, dict):
                 env.update({str(k): str(v) for k, v in value.items()})
+            elif key == "pricing" and isinstance(value, dict):
+                pricing.update(value)
             else:
                 merged[key] = value
 
@@ -104,7 +108,54 @@ def load_settings(
         merged["permissions"] = {**merged.get("permissions", {}), **permissions}
     if env:
         merged["env"] = env
+    if pricing:
+        merged["pricing"] = pricing
     return merged
+
+
+PRICE_FIELDS = {
+    "input": "input",
+    "output": "output",
+    "cacheRead": "cache_read",
+    "cache_read": "cache_read",
+    "cacheWrite": "cache_write",
+    "cache_write": "cache_write",
+    "contextWindow": "context_window",
+    "context_window": "context_window",
+}
+"""What a `pricing` entry may say, in either spelling."""
+
+
+def read_pricing(declared: Any) -> dict[str, ModelPricing]:
+    """Turn a settings file's `pricing` block into a table `Options` can use.
+
+    An entry that cannot be read is dropped with a warning rather than raising.
+    Pricing is ambient configuration describing what a run costs, and a typo in
+    it should not stop a run that would otherwise work -- the cost simply goes
+    back to being unknown, which is what it was before the entry existed.
+    """
+    from .pricing import ModelPricing
+
+    if not isinstance(declared, dict):
+        return {}
+    table: dict[str, ModelPricing] = {}
+    for pattern, entry in declared.items():
+        if not isinstance(entry, dict):
+            logger.warning("ignoring malformed pricing entry for %s", pattern)
+            continue
+        fields: dict[str, Any] = {}
+        try:
+            for key, value in entry.items():
+                field_name = PRICE_FIELDS.get(str(key))
+                if field_name is None:
+                    continue
+                fields[field_name] = (
+                    int(value) if field_name == "context_window" else float(value)
+                )
+            table[str(pattern)] = ModelPricing(**fields)
+        except (TypeError, ValueError):
+            logger.warning("ignoring malformed pricing entry for %s", pattern)
+    return table
 
 
 def apply_settings(options: Options) -> Options:
@@ -127,6 +178,9 @@ def apply_settings(options: Options) -> Options:
         changes["model"] = settings["model"]
     if settings.get("env"):
         changes["env"] = {**settings["env"], **options.env}
+    declared = read_pricing(settings.get("pricing"))
+    if declared:
+        changes["model_pricing"] = {**declared, **options.model_pricing}
     if permissions.get("defaultMode") and options.permission_mode == "default":
         changes["permission_mode"] = permissions["defaultMode"]
 
@@ -150,6 +204,7 @@ def apply_settings(options: Options) -> Options:
 
 __all__ = [
     "apply_settings",
+    "read_pricing",
     "load_settings",
     "settings_path",
     "SETTINGS_DIR",

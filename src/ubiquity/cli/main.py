@@ -12,6 +12,11 @@ rather than failing with a `ValueError` about a field the user has never heard
 of. The wizard writes the SDK's own user settings file, so `--sources` defaults
 to reading it and the choice sticks.
 
+Partial messages are asked for whenever reasoning is being shown, which is the
+default: a thinking block is only worth watching while it is being written.
+`--stream` is a separate question about the reply itself -- reasoning streams
+either way, and the answer is still rendered as markdown when the turn ends.
+
 Interrupt handling belongs here rather than in the SDK: `Options.abort` is the
 caller's event, and this is the caller. The first Ctrl-C sets it, which ends
 the run at the next tool call and still yields a result message; a second one
@@ -97,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--stream", action="store_true",
         help="stream replies as plain text instead of rendering markdown",
     )
+    parser.add_argument(
+        "--no-thinking", action="store_true", help="hide the model's reasoning"
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="show tool output")
     parser.add_argument("--no-color", action="store_true", help="disable color")
     return parser
@@ -133,7 +141,9 @@ def options_from(args: argparse.Namespace) -> Options:
         continue_conversation=args.continue_conversation,
         resume=args.resume,
         persist_session=not args.no_persist,
-        include_partial_messages=args.output_format == "text" and args.stream,
+        include_partial_messages=(
+            args.output_format == "text" and (args.stream or not args.no_thinking)
+        ),
     )
 
 
@@ -307,7 +317,10 @@ async def _main(argv: list[str] | None = None) -> int:
 
     options = apply_settings(options_from(args))
     renderer = Renderer(
-        args.output_format, verbose=args.verbose, stream_text=args.stream
+        args.output_format,
+        verbose=args.verbose,
+        stream_text=args.stream,
+        show_thinking=not args.no_thinking,
     )
     state = ReplState(options=options)
     if args.output_format == "text":

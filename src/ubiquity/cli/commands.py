@@ -52,6 +52,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/cost", "what this session has cost so far"),
     ("/cwd <path>", "change the working directory"),
     ("/verbose", "toggle tool output and usage lines"),
+    ("/thinking", "toggle the model's reasoning"),
     ("/exit", "leave (Ctrl-D works too)"),
 )
 
@@ -118,10 +119,27 @@ async def dispatch(line: str, state: ReplState, renderer: Renderer) -> str:
     elif name == "verbose":
         renderer.verbose = not renderer.verbose
         ui.note(f"  verbose {'on' if renderer.verbose else 'off'}", "ok")
+    elif name in ("thinking", "think"):
+        _thinking(state, renderer)
     else:
         ui.note(f"  unknown command: /{name} (try /help)", "warn")
 
     return "continue"
+
+
+def _thinking(state: ReplState, renderer: Renderer) -> None:
+    """Show or hide reasoning, and stop paying for deltas nobody is reading.
+
+    Partial messages are what makes a thinking block arrive while it is being
+    written, so turning the display off turns the stream off with it -- unless
+    `--stream` asked for the reply itself in pieces, which is a request of its
+    own to leave alone.
+    """
+    renderer.show_thinking = not renderer.show_thinking
+    state.options.include_partial_messages = (
+        renderer.show_thinking or renderer.stream_text
+    )
+    ui.note(f"  thinking {'on' if renderer.show_thinking else 'off'}", "ok")
 
 
 def _help() -> None:
