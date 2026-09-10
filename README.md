@@ -178,6 +178,8 @@ themselves land last, where they can override what came before.
 | `Glob` | Find files by pattern, newest first |
 | `Grep` | Search file contents by regex |
 | `TodoWrite` | Track multi-step work ([persistent](#todos)) |
+| `WebSearch` | Search the web across several keyless engines ([details](#web-access)) |
+| `WebFetch` | Fetch a URL and return it as Markdown ([details](#web-access)) |
 | `Agent` | Delegate to a subagent (added when `agents` is configured) |
 | `Skill` | Load a skill's instructions (added when [skills](#skills) are configured) |
 | `AskUserQuestion` | Put multiple-choice questions to the user (added when `can_use_tool` is set) |
@@ -189,6 +191,75 @@ writer never saw the part it would discard. `Read` returns at most 2,000 lines,
 so a longer file is a partial read by default; the way to edit one is to read it
 again with `limit` set past its last line, which the tool's description says and
 its error message repeats.
+
+## Web access
+
+`WebSearch` and `WebFetch` need no API key, no account, and no configuration.
+They are part of the built-in suite, so a fresh install can already read the
+web.
+
+`WebSearch` sends the query to several independent public engines at once —
+DuckDuckGo, Mojeek, Bing, and Wikipedia by default, plus Marginalia and Hacker
+News when `wide` is set — and merges what comes back with [Reciprocal Rank
+Fusion](https://dl.acm.org/doi/10.1145/1571941.1572114): a result scores
+`1 / (60 + rank)` for each engine that returned it, summed. Rank is the only
+signal the engines have in common, and it is enough — a page several
+independent indexes rank highly is a better answer than one index's favourite.
+Each result carries the engines that found it, so the model can see that
+agreement for itself.
+
+Fusion alone is topic-blind — every engine's first result gets the same credit,
+so a back end that answers a loose query loosely puts a stranger at the top —
+so the fused score is then scaled by the share of the query's own words the
+result mentions. An on-topic result loses nothing, and cross-engine agreement
+stays the deciding signal among the results that are about the right thing.
+
+Querying several engines is also what makes the tool hard to block. Engines
+refuse scrapes on fingerprint reputation, so a request that comes back 403,
+429, or with a challenge page is retried under a different browser user agent,
+and an engine that stays blocked is simply left out of the merge and named in
+the output. One provider down is one opinion lost, not the whole capability.
+
+```python
+from ubiquity import Options, summon
+
+async for message in summon(
+    "what changed in the latest pydantic-ai release?",
+    Options(allowed_tools=["WebSearch", "WebFetch"]),
+):
+    ...
+```
+
+Snippets in the search results are the engines' summaries, not page content.
+`WebFetch` is what reads a page: it follows redirects, reports the final URL,
+and converts the response to Markdown, trimming to the article body so the
+context window is spent on the text rather than on navigation and scripts.
+Headings, lists, tables, links, and code blocks survive the conversion —
+indentation inside a code block included. JSON responses come back formatted,
+and `format="text"` or `format="raw"` turn the conversion off. A long page is
+paged rather than cut: the response says how much is left and which `offset`
+reads the next section.
+
+Both tools are read-only and concurrency-safe, so several calls run in
+parallel. `WebSearch` is allowed without a prompt, since it only reads public
+indexes. `WebFetch` asks, and its approval is scoped to the host, so a rule
+names a domain:
+
+```python
+Options(
+    allowed_tools=["WebFetch(*.python.org)"],
+    disallowed_tools=["WebFetch(internal.example.com)"],
+)
+```
+
+The rule content is the host, so it takes the same three forms every other
+rule does: `WebFetch(docs.python.org)` names one host exactly,
+`WebFetch(*.python.org)` covers the subdomains, and `WebFetch(*)` is the whole
+web.
+
+A URL that resolves to a private, loopback, or link-local address is refused
+outright — on the original URL and again on every redirect hop, so a fetch
+cannot be steered into the machine's own network.
 
 ## Permissions
 

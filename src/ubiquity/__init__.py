@@ -77,6 +77,8 @@ from .tool import FileState, PermissionContext, Tool, ToolContext, ValidationErr
 from .tools import builtin_tools, resolve_tools
 from .tools.ask import AskUserQuestionInput, AskUserQuestionTool
 from .tools.skill import SkillTool
+from .tools.webfetch import WebFetchInput, WebFetchTool
+from .tools.websearch import WebSearchInput, WebSearchTool
 from .toolset import ToolDenied
 from .types import (
     PermissionMode,
@@ -127,6 +129,10 @@ __all__ = [
     "MemoryFile",
     "SkillTool",
     "AskUserQuestionTool",
+    "WebSearchTool",
+    "WebFetchTool",
+    "WebSearchInput",
+    "WebFetchInput",
     "AskUserQuestionInput",
     "load_skills",
     "load_memory",

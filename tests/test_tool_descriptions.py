@@ -33,7 +33,7 @@ def shipped_tools() -> list:
 
 KNOWN_TOOLS = {tool.name for tool in shipped_tools()} | {"Agent", "Skill"}
 
-ABSENT = {"WebFetch", "WebSearch", "NotebookEdit", "ExitPlanMode"}
+ABSENT = {"WebFetch", "WebSearch", "NotebookEdit", "ExitPlanMode"} - KNOWN_TOOLS
 
 
 def descriptions() -> dict[str, str]:
@@ -42,11 +42,13 @@ def descriptions() -> dict[str, str]:
 
 
 def test_nothing_the_model_reads_names_a_tool_we_do_not_have() -> None:
-    """Bash once told the model to use WebFetch, which never existed here.
+    """Bash once told the model to use WebFetch, before that tool existed.
 
     The whole package is scanned rather than just the descriptions, because
     that mistake was in a validation message: every string the model can read
-    is a place to send it after a tool that is not there.
+    is a place to send it after a tool that is not there. The absent set is
+    derived from the shipped one, so a name stops being forbidden the moment
+    a tool actually answers to it.
     """
     package = Path(ubiquity.__file__).parent
     for source in package.rglob("*.py"):
