@@ -127,7 +127,8 @@ class BashTool(Tool[BashInput]):
         "echo. Every segment of a command chained with `&&`, `||`, `;`, or a "
         "pipe must be permitted on its own, so two calls are more likely to be "
         "approved than one chain. Networking commands are refused: "
-        f"{BANNED_COMMAND_LIST}. Output over {MAX_OUTPUT_CHARS} characters is "
+        f"{BANNED_COMMAND_LIST}; use WebFetch to read a URL and WebSearch to "
+        f"search the web. Output over {MAX_OUTPUT_CHARS} characters is "
         "truncated from the middle. Timeout is in "
         f"milliseconds, default {DEFAULT_TIMEOUT_MS}, max {MAX_TIMEOUT_MS}."
     )
@@ -153,7 +154,11 @@ class BashTool(Tool[BashInput]):
         for segment in split_command(args.command):
             if (name := base_command(segment)) in BANNED_COMMANDS:
                 return ValidationError(
-                    message=f"`{name}` is not permitted: this tool has no network access."
+                    message=(
+                        f"`{name}` is not permitted: this tool has no network "
+                        "access. Use WebFetch to read a URL, or WebSearch to "
+                        "search the web."
+                    )
                 )
         return None
 

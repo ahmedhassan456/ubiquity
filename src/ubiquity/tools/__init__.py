@@ -15,6 +15,8 @@ from .grep import GrepInput, GrepTool
 from .read import ReadInput, ReadTool
 from .skill import SkillInput, SkillTool
 from .todo import TodoInput, TodoItem, TodoPatch, TodoWriteTool
+from .webfetch import WebFetchInput, WebFetchTool
+from .websearch import WebSearchInput, WebSearchTool
 from .write import WriteInput, WriteTool
 
 
@@ -31,6 +33,8 @@ def builtin_tools() -> list[Tool[Any]]:
         GlobTool(),
         GrepTool(),
         TodoWriteTool(),
+        WebSearchTool(),
+        WebFetchTool(),
     ]
 
 
@@ -95,6 +99,8 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "TodoWriteTool",
+    "WebSearchTool",
+    "WebFetchTool",
     "SkillTool",
     "AskUserQuestionTool",
     "ReadInput",
@@ -106,6 +112,8 @@ __all__ = [
     "TodoInput",
     "TodoItem",
     "TodoPatch",
+    "WebSearchInput",
+    "WebFetchInput",
     "SkillInput",
     "AskUserQuestionInput",
     "Question",
